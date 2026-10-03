@@ -582,8 +582,10 @@ impl Session {
         };
 
         if let Some(rid) = rid {
-            // Case A - use the rid_repair header to identify RTX.
-            let is_main = header.ext_vals.rid.is_some();
+            // Case A - use the rid_repair header to identify RTX. Some senders
+            // (pion) copy the rid header into RTX packets: the RTX payload type
+            // identifies those.
+            let is_main = header.ext_vals.rid.is_some() && payload.pt() == header.payload_type;
 
             let midrid = MidRid(mid, Some(rid));
 
