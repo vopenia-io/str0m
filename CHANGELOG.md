@@ -1,7 +1,8 @@
 # Unreleased
 
   * Without BWE, send every queued packet after one timeout instead of one timeout per packet
-  * Send the sender reports of streams due within half an interval together, in one compound packet
+  * Send each sender report in its own RTCP packet, with its source description
+  * Send the sender reports of streams due within half an interval at the same time
   * Take a packet with the RTX payload type as a repair packet even when it carries a RID header
 
 # 0.24.0

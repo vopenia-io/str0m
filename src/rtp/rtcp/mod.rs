@@ -153,11 +153,22 @@ impl Rtcp {
         // Capacity in words
         let word_capacity = total_len / 4;
 
+        // A receiver hands a compound packet to every stream it names (pion
+        // parses it once per such stream), so sender reports of several
+        // sources in one packet cost it quadratically. Like libwebrtc, which
+        // has one RTCP sender per stream, each sender report goes in its own
+        // packet with its source description.
+        let mut report = Rtcp::take_sender_report(feedback);
+        let queue = match &mut report {
+            Some(report) => report,
+            None => &mut *feedback,
+        };
+
         // Pack RTCP feedback packets. Merge together ones of the same type.
-        Rtcp::pack(feedback, word_capacity);
+        Rtcp::pack(queue, word_capacity);
 
         let mut offset = 0;
-        while let Some(fb) = feedback.front() {
+        while let Some(fb) = queue.front() {
             // Length of next item.
             let item_len = fb.length_words() * 4;
 
@@ -168,7 +179,7 @@ impl Rtcp {
             }
 
             // We definitely can fit the next RTCP item.
-            let fb = feedback.pop_front().unwrap();
+            let fb = queue.pop_front().unwrap();
             let written = fb.write_to(&mut buf[offset..]);
 
             assert_eq!(
@@ -183,7 +194,53 @@ impl Rtcp {
             offset += item_len;
         }
 
+        if let Some(report) = report {
+            for fb in report.into_iter().rev() {
+                feedback.push_front(fb);
+            }
+        }
+
         offset
+    }
+
+    /// The first sender report with its source description, when several
+    /// sources have a sender report queued.
+    fn take_sender_report(feedback: &mut VecDeque<Self>) -> Option<VecDeque<Self>> {
+        let reports = feedback
+            .iter()
+            .filter(|fb| matches!(fb, Rtcp::SenderReport(_)))
+            .count();
+        if reports < 2 {
+            return None;
+        }
+        let (i, ssrc) = feedback.iter().enumerate().find_map(|(i, fb)| match fb {
+            Rtcp::SenderReport(sr) => Some((i, sr.sender_info.ssrc)),
+            _ => None,
+        })?;
+        let mut report: VecDeque<Self> = feedback.remove(i).into_iter().collect();
+
+        let description = feedback.iter_mut().find_map(|fb| match fb {
+            Rtcp::SourceDescription(d) if d.reports.iter().any(|s| s.ssrc == ssrc) => Some(d),
+            _ => None,
+        });
+        if let Some(description) = description {
+            let mut found = None;
+            for sdes in std::mem::take(&mut *description.reports) {
+                if found.is_none() && sdes.ssrc == ssrc {
+                    found = Some(sdes);
+                } else {
+                    description.reports.push(sdes);
+                }
+            }
+            if let Some(sdes) = found {
+                report.push_back(Rtcp::SourceDescription(Descriptions {
+                    reports: Box::new(sdes.into()),
+                }));
+            }
+            feedback.retain(|fb| !fb.is_empty());
+        }
+
+        Some(report)
     }
 
     fn merge(&mut self, other: &mut Rtcp, words_left: usize) -> bool {
@@ -556,6 +613,38 @@ mod test {
     }
 
     #[test]
+    fn each_sender_report_goes_in_its_own_packet() {
+        let now = SystemTime::now();
+        let mut feedback = VecDeque::new();
+        for ssrc in [1, 3, 5] {
+            feedback.push_back(sr(ssrc, now));
+            feedback.push_back(sdes(ssrc));
+        }
+        feedback.push_back(rr(7));
+
+        let mut packets = vec![];
+        loop {
+            let mut buf = vec![0_u8; 1360];
+            let mut items = vec![];
+            let n = Rtcp::write_packet(&mut feedback, &mut buf, |fb| items.push(fb));
+            if n == 0 {
+                break;
+            }
+            let sources: Vec<u32> = items
+                .iter()
+                .filter_map(|fb| match fb {
+                    Rtcp::SenderReport(sr) => Some(*sr.sender_info.ssrc),
+                    Rtcp::SourceDescription(d) => Some(*d.reports.get(0).unwrap().ssrc),
+                    _ => None,
+                })
+                .collect();
+            packets.push(sources);
+        }
+
+        assert_eq!(packets, vec![vec![1, 1], vec![3, 3], vec![5, 5]]);
+    }
+
+    #[test]
     fn pack_4_rr() {
         let mut queue = VecDeque::new();
         queue.push_back(rr(1));
@@ -634,6 +723,20 @@ mod test {
                 sender_octet_count: 6,
             },
             reports: report(2).into(),
+        })
+    }
+
+    fn sdes(ssrc: u32) -> Rtcp {
+        let mut values = ReportList::new();
+        values.push((SdesType::CNAME, "cname".to_string()));
+        Rtcp::SourceDescription(Descriptions {
+            reports: Box::new(
+                Sdes {
+                    ssrc: ssrc.into(),
+                    values,
+                }
+                .into(),
+            ),
         })
     }
 
