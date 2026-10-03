@@ -1232,19 +1232,25 @@ impl Session {
         let nack_at = self.nack_at();
         let twcc_at = self.twcc_at();
         let pacing_at = self.pacer.poll_timeout();
-        let packetize_at = self.medias.iter().filter_map(|m| m.poll_timeout()).min();
-        let receive_at = self
-            .medias
-            .iter_mut()
-            .filter_map(|media| {
-                let timeout = if media.kind().is_video() {
-                    self.reordering_timeout_video
-                } else {
-                    self.reordering_timeout_audio
-                };
-                media.poll_receive_timeout(timeout)
-            })
-            .min();
+        // In rtp_mode, the medias neither packetize nor depayload.
+        let (packetize_at, receive_at) = if self.rtp_mode {
+            (None, None)
+        } else {
+            let packetize_at = self.medias.iter().filter_map(|m| m.poll_timeout()).min();
+            let receive_at = self
+                .medias
+                .iter_mut()
+                .filter_map(|media| {
+                    let timeout = if media.kind().is_video() {
+                        self.reordering_timeout_video
+                    } else {
+                        self.reordering_timeout_audio
+                    };
+                    media.poll_receive_timeout(timeout)
+                })
+                .min();
+            (packetize_at, receive_at)
+        };
         let paused_at = self.paused_at();
         let send_stream_at = self.streams.send_stream();
 
@@ -1389,6 +1395,10 @@ impl Session {
     }
 
     fn do_payload(&mut self, now: Instant) -> Result<(), RtcError> {
+        // The frame API that fills the payload queues is closed in rtp_mode.
+        if self.rtp_mode {
+            return Ok(());
+        }
         let mtu = self.mtu();
         for m in &mut self.medias {
             m.do_payload(
