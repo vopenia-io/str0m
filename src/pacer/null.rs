@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use foldhash::HashMap;
 use std::time::Instant;
 
 use super::Pacer;

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+// Looked up for every packet: a faster hasher than SipHash, still seeded.
+use foldhash::HashMap;
 use std::fmt::{self};
 use std::sync::Arc;
 use std::time::Duration;
@@ -251,7 +254,7 @@ impl Streams {
             last_rx_lookup_cleanup: already_happened(),
             streams_tx: Default::default(),
             active_tx: Vec::new(),
-            tx_by_midrid: HashMap::new(),
+            tx_by_midrid: HashMap::default(),
             idle_tx_report_at: None,
             idle_tx_stale: false,
             keyframe_requests: false,

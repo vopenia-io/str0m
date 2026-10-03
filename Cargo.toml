@@ -53,6 +53,7 @@ _str0m_test = { path = "crates/_str0m_test" }
 # Core dependencies
 tracing = "0.1.37"
 fastrand = "2.0.1"
+foldhash = "0.2"
 sctp-proto = "0.10.5"
 combine = "4.6.6"
 subtle = "2.0.0"
@@ -130,6 +131,7 @@ drv = ["dep:drv"]
 [dependencies]
 tracing.workspace = true
 fastrand.workspace = true
+foldhash.workspace = true
 sctp-proto.workspace = true
 combine.workspace = true
 subtle.workspace = true
