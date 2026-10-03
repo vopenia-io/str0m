@@ -1354,6 +1354,33 @@ mod test {
     use super::*;
 
     #[test]
+    fn stream_lookup_by_midrid_follows_removals() {
+        use crate::rtp_::MidRid;
+        use crate::streams::Streams;
+
+        let mut streams = Streams::new(false, 1200, Duration::from_millis(1500));
+        let a = MidRid("a".into(), None);
+        let high = MidRid("b".into(), Some("h".into()));
+        streams.declare_stream_tx(1.into(), None, a);
+        streams.declare_stream_tx(2.into(), None, high);
+
+        assert_eq!(streams.stream_tx_by_midrid(a).unwrap().ssrc(), 1.into());
+        assert_eq!(streams.stream_tx_by_midrid(high).unwrap().ssrc(), 2.into());
+        // Without a rid, any stream of the mid.
+        let b = MidRid("b".into(), None);
+        assert_eq!(streams.stream_tx_by_midrid(b).unwrap().ssrc(), 2.into());
+
+        streams.remove_stream_tx(1.into());
+        assert!(streams.stream_tx_by_midrid(a).is_none());
+        streams.declare_stream_tx(3.into(), None, a);
+        assert_eq!(streams.stream_tx_by_midrid(a).unwrap().ssrc(), 3.into());
+
+        streams.remove_streams_by_mid("b".into());
+        assert!(streams.stream_tx_by_midrid(high).is_none());
+        assert!(streams.stream_tx_by_midrid(b).is_none());
+    }
+
+    #[test]
     fn regular_padding_does_not_search_probe_negotiation() {
         let mut streams = crate::streams::Streams::new(false, 1200, Duration::from_millis(1500));
         let stream =

@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Remember the send stream found for a mid/rid instead of walking all streams for each packet
   * Poll SCTP only after something changed for it, not for every output
   * In rtp_mode, skip the medias' packetize and depayload timeouts, unused there
   * Walk only the send streams with something to send on timeouts, and all of them when a sender report is due

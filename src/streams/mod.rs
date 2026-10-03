@@ -142,6 +142,10 @@ pub(crate) struct Streams {
     /// streams when a sender report is due.
     active_tx: Vec<Ssrc>,
 
+    /// Send stream last found for a mid/rid: checked on use, the streams
+    /// are walked only when it no longer matches.
+    tx_by_midrid: HashMap<MidRid, Ssrc>,
+
     /// Earliest sender report among the send streams not in `active_tx`.
     idle_tx_report_at: Option<Instant>,
 
@@ -247,6 +251,7 @@ impl Streams {
             last_rx_lookup_cleanup: already_happened(),
             streams_tx: Default::default(),
             active_tx: Vec::new(),
+            tx_by_midrid: HashMap::new(),
             idle_tx_report_at: None,
             idle_tx_stale: false,
             keyframe_requests: false,
@@ -419,6 +424,7 @@ impl Streams {
 
     pub fn remove_stream_tx(&mut self, ssrc: Ssrc) -> bool {
         self.active_tx.retain(|s| *s != ssrc);
+        self.tx_by_midrid.retain(|_, s| *s != ssrc);
         self.streams_tx.remove(&ssrc).is_some()
     }
 
@@ -829,11 +835,29 @@ impl Streams {
             self.probe_media?;
             return Some(&mut self.probe_tx);
         }
-        let (ssrc, stream) = self
-            .streams_tx
-            .iter_mut()
-            .find(|(_, s)| s.is_midrid(midrid))?;
-        Some(activate(&mut self.active_tx, *ssrc, stream))
+        let cached = self.tx_by_midrid.get(&midrid).copied().filter(|ssrc| {
+            self.streams_tx
+                .get(ssrc)
+                .is_some_and(|s| s.is_midrid(midrid))
+        });
+        let ssrc = match cached {
+            Some(ssrc) => ssrc,
+            None => {
+                let ssrc = self
+                    .streams_tx
+                    .iter()
+                    .find(|(_, s)| s.is_midrid(midrid))
+                    .map(|(ssrc, _)| *ssrc);
+                let Some(ssrc) = ssrc else {
+                    self.tx_by_midrid.remove(&midrid);
+                    return None;
+                };
+                self.tx_by_midrid.insert(midrid, ssrc);
+                ssrc
+            }
+        };
+        let stream = self.streams_tx.get_mut(&ssrc)?;
+        Some(activate(&mut self.active_tx, ssrc, stream))
     }
 
     pub(crate) fn stream_rx_by_midrid(
@@ -854,6 +878,8 @@ impl Streams {
         self.streams_tx.retain(|_, s| s.mid() != mid);
         let streams_tx = &self.streams_tx;
         self.active_tx.retain(|ssrc| streams_tx.contains_key(ssrc));
+        self.tx_by_midrid
+            .retain(|_, ssrc| streams_tx.contains_key(ssrc));
         self.streams_rx.retain(|_, s| s.mid() != mid);
         self.rx_lookup.retain(|_, v| v.mid != mid);
     }
