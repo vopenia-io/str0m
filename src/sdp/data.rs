@@ -19,6 +19,7 @@ use str0m_proto::Id;
 
 use super::SdpError;
 use super::parser::sdp_parser;
+use combine::Parser;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sdp {
@@ -28,6 +29,13 @@ pub struct Sdp {
 
 impl Sdp {
     pub(crate) fn parse(input: &str) -> Result<Sdp, SdpError> {
+        // The plain stream's errors cost nothing, where easy_parse builds a
+        // detailed error for every alternative tried on every line: ten
+        // times slower on a large SDP. Only a failed parse is run again
+        // for the message.
+        if let Ok((sdp, _)) = sdp_parser().parse(input) {
+            return Ok(sdp);
+        }
         sdp_parser()
             .easy_parse(input)
             .map(|(sdp, _)| sdp)
@@ -1693,6 +1701,69 @@ mod test {
     /// Covers error handling, SDP generation, BUNDLE groups, and media line configuration.
     mod sdp_parsing {
         use super::*;
+
+        /// A large offer like a browser's with many receive sections.
+        fn large_offer(sections: usize) -> String {
+            let mut sdp = String::from(
+                "v=0\r\no=- 1065294795078650179 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+                 a=msid-semantic:WMS *\r\n",
+            );
+            let mids: Vec<String> = (0..sections).map(|i| i.to_string()).collect();
+            sdp.push_str(&format!("a=group:BUNDLE {}\r\n", mids.join(" ")));
+            for mid in &mids {
+                let video = mid.parse::<usize>().unwrap_or(0) % 2 == 1;
+                if video {
+                    sdp.push_str(
+                        "m=video 9 UDP/TLS/RTP/SAVPF 96 97 102 103\r\n\
+                         c=IN IP4 0.0.0.0\r\n\
+                         a=setup:actpass\r\n\
+                         a=ice-ufrag:abcd\r\n\
+                         a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+                         a=rtcp-mux\r\n\
+                         a=rtcp-rsize\r\n\
+                         a=fingerprint:sha-256 A6:64:23:37:94:7E:4B:40:F6:62:86:8C:DD:09:D5:08:\
+                         7E:D4:0E:68:58:93:45:EC:99:F2:91:F7:19:72:E7:BB\r\n\
+                         a=rtpmap:96 VP8/90000\r\n\
+                         a=rtcp-fb:96 goog-remb \r\n\
+                         a=rtcp-fb:96 ccm fir\r\n\
+                         a=rtcp-fb:96 nack \r\n\
+                         a=rtcp-fb:96 nack pli\r\n\
+                         a=rtpmap:97 rtx/90000\r\n\
+                         a=fmtp:97 apt=96\r\n\
+                         a=rtpmap:102 H264/90000\r\n\
+                         a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
+                         a=rtpmap:103 rtx/90000\r\n\
+                         a=fmtp:103 apt=102\r\n\
+                         a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+                         a=recvonly\r\n",
+                    );
+                } else {
+                    sdp.push_str(
+                        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                         c=IN IP4 0.0.0.0\r\n\
+                         a=setup:actpass\r\n\
+                         a=ice-ufrag:abcd\r\n\
+                         a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+                         a=rtcp-mux\r\n\
+                         a=rtpmap:111 opus/48000/2\r\n\
+                         a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+                         a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+                         a=recvonly\r\n",
+                    );
+                }
+                sdp.push_str(&format!("a=mid:{mid}\r\n"));
+            }
+            sdp
+        }
+
+        #[test]
+        fn plain_and_detailed_errors_parse_alike() {
+            let input = large_offer(40);
+            let parsed = Sdp::parse(&input).unwrap();
+            assert_eq!(parsed.media_lines.len(), 40);
+            let (detailed, _) = sdp_parser().easy_parse(input.as_str()).unwrap();
+            assert_eq!(parsed, detailed);
+        }
 
         #[test]
         fn parse_error() {

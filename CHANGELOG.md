@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Parse SDP without detailed errors first, five times faster on large SDPs; a failed parse is run again for the message
   * Look for media added or changed events only after a media was added or changed
   * Remember the send stream found for a mid/rid instead of walking all streams for each packet
   * Poll SCTP only after something changed for it, not for every output
