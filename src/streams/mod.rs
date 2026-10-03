@@ -136,6 +136,18 @@ pub(crate) struct Streams {
     /// All outgoing encoded streams.
     streams_tx: HashMap<Ssrc, StreamTx>,
 
+    /// Send streams that may have packets to timestamp or send, or whose
+    /// sender report time may have moved: handed out mutably since the last
+    /// timeout, or still holding packets. A timeout walks only these, and all
+    /// streams when a sender report is due.
+    active_tx: Vec<Ssrc>,
+
+    /// Earliest sender report among the send streams not in `active_tx`.
+    idle_tx_report_at: Option<Instant>,
+
+    /// `idle_tx_report_at` is to be recomputed over all streams.
+    idle_tx_stale: bool,
+
     /// A StreamTx may hold a keyframe request: a PLI or FIR arrived since
     /// the last poll that found none.
     keyframe_requests: bool,
@@ -169,6 +181,51 @@ pub(crate) struct Streams {
     pause_threshold: Duration,
 }
 
+/// Lists `stream` in `active_tx`, once.
+fn activate<'a>(
+    active_tx: &mut Vec<Ssrc>,
+    ssrc: Ssrc,
+    stream: &'a mut StreamTx,
+) -> &'a mut StreamTx {
+    if !stream.active {
+        stream.active = true;
+        active_tx.push(ssrc);
+    }
+    stream
+}
+
+/// The send streams, or only the active ones.
+enum SendStreams<'a> {
+    All(std::collections::hash_map::ValuesMut<'a, Ssrc, StreamTx>),
+    Active(&'a mut HashMap<Ssrc, StreamTx>, std::slice::Iter<'a, Ssrc>),
+}
+
+impl<'a> SendStreams<'a> {
+    fn new(
+        streams_tx: &'a mut HashMap<Ssrc, StreamTx>,
+        active_tx: &'a [Ssrc],
+        only_active: bool,
+    ) -> Self {
+        if only_active {
+            SendStreams::Active(streams_tx, active_tx.iter())
+        } else {
+            SendStreams::All(streams_tx.values_mut())
+        }
+    }
+
+    fn next(&mut self) -> Option<&mut StreamTx> {
+        match self {
+            SendStreams::All(streams) => streams.next(),
+            SendStreams::Active(streams, active) => loop {
+                let ssrc = active.next()?;
+                if streams.contains_key(ssrc) {
+                    return streams.get_mut(ssrc);
+                }
+            },
+        }
+    }
+}
+
 /// Delay between cleaning up the RxLookup.
 const RX_LOOKUP_CLEANUP_INTERVAL: Duration = Duration::from_millis(10_000);
 
@@ -189,6 +246,9 @@ impl Streams {
             rx_lookup: Default::default(),
             last_rx_lookup_cleanup: already_happened(),
             streams_tx: Default::default(),
+            active_tx: Vec::new(),
+            idle_tx_report_at: None,
+            idle_tx_stale: false,
             keyframe_requests: false,
             remb_requests: false,
             probe_tx: StreamTx::new_probe(mtu_warn),
@@ -350,12 +410,15 @@ impl Streams {
         rtx: Option<Ssrc>,
         midrid: MidRid,
     ) -> &mut StreamTx {
-        self.streams_tx
+        let stream = self
+            .streams_tx
             .entry(ssrc)
-            .or_insert_with(|| StreamTx::new(ssrc, rtx, midrid, self.enable_stats, self.mtu_warn))
+            .or_insert_with(|| StreamTx::new(ssrc, rtx, midrid, self.enable_stats, self.mtu_warn));
+        activate(&mut self.active_tx, ssrc, stream)
     }
 
     pub fn remove_stream_tx(&mut self, ssrc: Ssrc) -> bool {
+        self.active_tx.retain(|s| *s != ssrc);
         self.streams_tx.remove(&ssrc).is_some()
     }
 
@@ -377,7 +440,8 @@ impl Streams {
     }
 
     pub fn stream_tx(&mut self, ssrc: &Ssrc) -> Option<&mut StreamTx> {
-        self.streams_tx.get_mut(ssrc)
+        let stream = self.streams_tx.get_mut(ssrc)?;
+        Some(activate(&mut self.active_tx, *ssrc, stream))
     }
 
     /// Lookup the "main" SSRC and mid for a given SSRC(main or RTX).
@@ -419,8 +483,16 @@ impl Streams {
             .values()
             .filter(|s| !s.ssrc().is_probe())
             .map(|s| s.receiver_report_at(i));
-        let s = self.streams_tx.values().map(|s| s.sender_report_at(i));
-        r.chain(s).min()
+        r.chain(self.sender_report_at(i)).min()
+    }
+
+    fn sender_report_at(&self, i: RtcpReportIntervals) -> Option<Instant> {
+        let active = self
+            .active_tx
+            .iter()
+            .filter_map(|ssrc| self.streams_tx.get(ssrc))
+            .map(|s| s.sender_report_at(i));
+        active.chain(self.idle_tx_report_at).min()
     }
 
     pub(crate) fn paused_at(&self) -> Option<Instant> {
@@ -428,7 +500,11 @@ impl Streams {
     }
 
     pub(crate) fn send_stream(&self) -> Option<Instant> {
-        if self.streams_tx.values().any(|s| s.need_timeout()) {
+        let mut active = self
+            .active_tx
+            .iter()
+            .filter_map(|ssrc| self.streams_tx.get(ssrc));
+        if active.any(|s| s.need_timeout()) {
             Some(already_happened())
         } else {
             None
@@ -473,29 +549,43 @@ impl Streams {
             stream.handle_timeout(now);
         }
 
-        self.mids_to_report.clear(); // start over for StreamTx.
-        if self.streams_tx.values().any(|s| s.need_sr(now, intervals)) {
+        let report_due = self.sender_report_at(intervals).is_some_and(|at| now >= at);
+
+        if !report_due {
+            // Only the active streams can have packets to timestamp, or a
+            // first timeout to take.
+            for ssrc in &self.active_tx {
+                let Some(stream) = self.streams_tx.get_mut(ssrc) else {
+                    continue;
+                };
+                let mid = stream.mid();
+                let get_media = move || (medias.iter().find(|m| m.mid() == mid).unwrap(), codecs);
+                stream.handle_timeout(now, get_media);
+            }
+        } else {
+            self.mids_to_report.clear(); // start over for StreamTx.
             for stream in self.streams_tx.values() {
                 if stream.need_sr_soon(now, intervals) {
                     self.mids_to_report.push(stream.mid());
                 }
             }
-        }
 
-        for stream in self.streams_tx.values_mut() {
-            let mid = stream.mid();
+            for stream in self.streams_tx.values_mut() {
+                let mid = stream.mid();
 
-            // All StreamTx belonging to the same Mid are reported together.
-            if self.mids_to_report.contains(&mid) {
-                stream.create_sr_and_update(now, feedback);
+                // All StreamTx belonging to the same Mid are reported together.
+                if self.mids_to_report.contains(&mid) {
+                    stream.create_sr_and_update(now, feedback);
+                }
+
+                // Finding the first (main) PT that also has RTX for the Media is expensive,
+                // this closure is run only when needed.
+                // The unwrap is okay because we cannot have StreamTx with a Mid without the corresponding Media.
+                let get_media = move || (medias.iter().find(|m| m.mid() == mid).unwrap(), codecs);
+
+                stream.handle_timeout(now, get_media);
             }
-
-            // Finding the first (main) PT that also has RTX for the Media is expensive,
-            // this closure is run only when needed.
-            // The unwrap is okay because we cannot have StreamTx with a Mid without the corresponding Media.
-            let get_media = move || (medias.iter().find(|m| m.mid() == mid).unwrap(), codecs);
-
-            stream.handle_timeout(now, get_media);
+            self.idle_tx_stale = true;
         }
 
         if now > self.rx_lookup_at() {
@@ -507,15 +597,52 @@ impl Streams {
 
     /// Hands incoming feedback to the StreamTx it is for.
     pub(crate) fn handle_rtcp_tx(&mut self, now: Instant, fb: RtcpFb) {
-        let Some(stream) = self.streams_tx.get_mut(&fb.ssrc()) else {
+        let ssrc = fb.ssrc();
+        let Some(stream) = self.streams_tx.get_mut(&ssrc) else {
             return;
         };
         match fb {
             RtcpFb::Pli(_) | RtcpFb::Fir(_) => self.keyframe_requests = true,
             RtcpFb::Remb(_) => self.remb_requests = true,
+            // Resends to queue.
+            RtcpFb::Nack(..) => {
+                activate(&mut self.active_tx, ssrc, stream);
+            }
             _ => {}
         }
         stream.handle_rtcp(now, fb);
+    }
+
+    /// After a timeout: the streams left with nothing to send leave
+    /// `active_tx`, their sender report time joins `idle_tx_report_at`.
+    pub(crate) fn settle_tx(&mut self, intervals: RtcpReportIntervals) {
+        let streams_tx = &mut self.streams_tx;
+        let mut idle = if self.idle_tx_stale {
+            None
+        } else {
+            self.idle_tx_report_at
+        };
+        self.active_tx.retain(|ssrc| {
+            let Some(stream) = streams_tx.get_mut(ssrc) else {
+                return false;
+            };
+            if stream.has_queued() {
+                return true;
+            }
+            stream.active = false;
+            let at = stream.sender_report_at(intervals);
+            idle = Some(idle.map_or(at, |idle| idle.min(at)));
+            false
+        });
+        if self.idle_tx_stale {
+            let others = streams_tx
+                .values()
+                .filter(|s| !s.active)
+                .map(|s| s.sender_report_at(intervals));
+            idle = idle.into_iter().chain(others).min();
+            self.idle_tx_stale = false;
+        }
+        self.idle_tx_report_at = idle;
     }
 
     // Polled for every output: without a pending request, no walk over the
@@ -661,9 +788,12 @@ impl Streams {
         self.probe_media = media;
     }
 
+    /// Queue states of all send streams, or of the active ones only: the
+    /// others hold nothing.
     pub(crate) fn send_queue_states(
         &mut self,
         now: Instant,
+        only_active: bool,
         mut can_probe: impl FnMut(Mid, Pt) -> bool,
     ) -> impl Iterator<Item = QueueState> {
         // Snapshot each stream once, preferring media/RTX padding over the
@@ -674,7 +804,7 @@ impl Streams {
             queue.midrid = MidRid(MID_PROBE, None);
             queue
         });
-        let mut streams = self.streams_tx.values_mut();
+        let mut streams = SendStreams::new(&mut self.streams_tx, &self.active_tx, only_active);
         std::iter::from_fn(move || {
             if let Some(stream) = streams.next() {
                 let mut queue = stream.queue_state(now);
@@ -699,7 +829,11 @@ impl Streams {
             self.probe_media?;
             return Some(&mut self.probe_tx);
         }
-        self.streams_tx.values_mut().find(|s| s.is_midrid(midrid))
+        let (ssrc, stream) = self
+            .streams_tx
+            .iter_mut()
+            .find(|(_, s)| s.is_midrid(midrid))?;
+        Some(activate(&mut self.active_tx, *ssrc, stream))
     }
 
     pub(crate) fn stream_rx_by_midrid(
@@ -718,6 +852,8 @@ impl Streams {
 
     pub(crate) fn remove_streams_by_mid(&mut self, mid: Mid) {
         self.streams_tx.retain(|_, s| s.mid() != mid);
+        let streams_tx = &self.streams_tx;
+        self.active_tx.retain(|ssrc| streams_tx.contains_key(ssrc));
         self.streams_rx.retain(|_, s| s.mid() != mid);
         self.rx_lookup.retain(|_, v| v.mid != mid);
     }

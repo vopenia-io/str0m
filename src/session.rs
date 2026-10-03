@@ -339,6 +339,7 @@ impl Session {
 
         let probe_media = self.handle_timeout_bwe(now);
         self.update_queue_state(now, probe_media);
+        self.streams.settle_tx(self.intervals);
 
         if let Some(twcc_at) = self.twcc_at() {
             if now >= twcc_at {
@@ -390,7 +391,9 @@ impl Session {
         self.streams.set_probe_media(probe_media);
         let medias = &self.medias;
         let codecs = &self.codec_config;
-        let iter = self.streams.send_queue_states(now, |mid, pt| {
+        // Without pacing, only the queues holding packets matter.
+        let only_active = matches!(self.pacer, PacerImpl::Null(_));
+        let iter = self.streams.send_queue_states(now, only_active, |mid, pt| {
             // Reuse the already-validated fallback binding when it matches.
             probe_media == Some((mid, pt))
                 || medias

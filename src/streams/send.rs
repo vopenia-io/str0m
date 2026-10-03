@@ -151,6 +151,9 @@ pub struct StreamTx {
     /// Last time we produced a SR.
     last_sender_report: Instant,
 
+    /// Listed in `Streams::active_tx`.
+    pub(crate) active: bool,
+
     /// If we have a pending incoming keyframe request.
     pending_request_keyframe: Option<KeyframeRequestKind>,
 
@@ -326,6 +329,7 @@ impl StreamTx {
             rtx_cache: RtxCache::new(2000, DEFAULT_RTX_CACHE_DURATION),
             rtx_ratio_cap: DEFAULT_RTX_RATIO_CAP,
             last_sender_report: already_happened(),
+            active: false,
             pending_request_keyframe: None,
             pending_request_remb: None,
             stats: StreamTxStats::new(enable_stats),
@@ -1227,6 +1231,11 @@ impl StreamTx {
         self.padding += padding;
     }
 
+    /// Packets, resends or padding still waiting to go out.
+    pub(crate) fn has_queued(&self) -> bool {
+        !self.send_queue.is_empty() || !self.resends.is_empty() || self.padding > 0
+    }
+
     pub(crate) fn need_timeout(&self) -> bool {
         self.send_queue.need_timeout()
     }
@@ -1351,7 +1360,7 @@ mod test {
             streams.declare_stream_tx(42.into(), Some(44.into()), MidRid("vid".into(), None));
         stream.pt_for_padding = Some(96.into());
         let queues: Vec<_> = streams
-            .send_queue_states(Instant::now(), |_, _| {
+            .send_queue_states(Instant::now(), false, |_, _| {
                 panic!("ordinary padding must not check probe negotiation")
             })
             .collect();
@@ -1450,7 +1459,10 @@ mod test {
         // from selection, without resetting the SRTP index for the next cluster.
         streams.set_probe_media(None);
         assert!(streams.stream_tx_by_midrid(queue).is_none());
-        assert_eq!(streams.send_queue_states(now, |_, _| true).count(), 0);
+        assert_eq!(
+            streams.send_queue_states(now, false, |_, _| true).count(),
+            0
+        );
         streams.set_probe_media(Some(("vid".into(), 96.into())));
         assert_eq!(streams.streams_tx().count(), 0);
         let stream = streams.stream_tx_by_midrid(queue).unwrap();
