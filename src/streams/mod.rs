@@ -15,7 +15,7 @@ use crate::rtp_::Ssrc;
 use crate::rtp_::{Bitrate, Pt};
 use crate::rtp_::{MediaTime, SenderInfo};
 use crate::rtp_::{Mid, Rid, SeqNo};
-use crate::rtp_::{Rtcp, RtpHeader};
+use crate::rtp_::{Rtcp, RtcpFb, RtpHeader};
 use crate::util::already_happened;
 
 pub use self::receive::StreamRx;
@@ -136,6 +136,13 @@ pub(crate) struct Streams {
     /// All outgoing encoded streams.
     streams_tx: HashMap<Ssrc, StreamTx>,
 
+    /// A StreamTx may hold a keyframe request: a PLI or FIR arrived since
+    /// the last poll that found none.
+    keyframe_requests: bool,
+
+    /// A StreamTx may hold a REMB request.
+    remb_requests: bool,
+
     /// Non-media padding source. Its sequence counter survives media changes.
     probe_tx: StreamTx,
     probe_media: Option<(Mid, Pt)>,
@@ -182,6 +189,8 @@ impl Streams {
             rx_lookup: Default::default(),
             last_rx_lookup_cleanup: already_happened(),
             streams_tx: Default::default(),
+            keyframe_requests: false,
+            remb_requests: false,
             probe_tx: StreamTx::new_probe(mtu_warn),
             probe_media: None,
             default_ssrc_tx: 0.into(), // this will be changed
@@ -496,15 +505,35 @@ impl Streams {
         }
     }
 
+    /// Hands incoming feedback to the StreamTx it is for.
+    pub(crate) fn handle_rtcp_tx(&mut self, now: Instant, fb: RtcpFb) {
+        let Some(stream) = self.streams_tx.get_mut(&fb.ssrc()) else {
+            return;
+        };
+        match fb {
+            RtcpFb::Pli(_) | RtcpFb::Fir(_) => self.keyframe_requests = true,
+            RtcpFb::Remb(_) => self.remb_requests = true,
+            _ => {}
+        }
+        stream.handle_rtcp(now, fb);
+    }
+
+    // Polled for every output: without a pending request, no walk over the
+    // streams, which a subscriber in a large room has by the hundred.
     pub(crate) fn poll_keyframe_request(&mut self) -> Option<KeyframeRequest> {
-        self.streams_tx.values_mut().find_map(|s| {
+        if !self.keyframe_requests {
+            return None;
+        }
+        let request = self.streams_tx.values_mut().find_map(|s| {
             let kind = s.poll_keyframe_request()?;
             Some(KeyframeRequest {
                 mid: s.mid(),
                 rid: s.rid(),
                 kind,
             })
-        })
+        });
+        self.keyframe_requests = request.is_some();
+        request
     }
 
     pub(crate) fn poll_sender_feedback(&mut self) -> Option<SenderFeedback> {
@@ -521,9 +550,15 @@ impl Streams {
     }
 
     pub(crate) fn poll_remb_request(&mut self) -> Option<(Mid, Bitrate)> {
-        self.streams_tx
+        if !self.remb_requests {
+            return None;
+        }
+        let request = self
+            .streams_tx
             .values_mut()
-            .find_map(|s| s.poll_remb_request().map(|b| (s.mid(), b)))
+            .find_map(|s| s.poll_remb_request().map(|b| (s.mid(), b)));
+        self.remb_requests = request.is_some();
+        request
     }
 
     pub(crate) fn poll_stream_paused(&mut self) -> Option<StreamPaused> {

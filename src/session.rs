@@ -926,10 +926,7 @@ impl Session {
                 };
                 stream.handle_rtcp(now, fb);
             } else {
-                let Some(stream) = self.streams.stream_tx(&fb.ssrc()) else {
-                    continue;
-                };
-                stream.handle_rtcp(now, fb);
+                self.streams.handle_rtcp_tx(now, fb);
             }
         }
 

@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Look for keyframe and REMB requests among the send streams only after receiving one
   * Without BWE, send every queued packet after one timeout instead of one timeout per packet
   * Send each sender report in its own RTCP packet, with its source description
   * Send the sender reports of streams due within half an interval at the same time

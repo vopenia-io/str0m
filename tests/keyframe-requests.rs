@@ -206,3 +206,68 @@ fn keyframe_request_possibility_check() -> Result<(), RtcError> {
 
     Ok(())
 }
+
+/// A PLI arriving after earlier requests were all polled is still reported.
+#[test]
+fn keyframe_request_after_an_earlier_one_was_polled() -> Result<(), RtcError> {
+    init_log();
+    init_crypto_default();
+
+    let mut l = TestRtc::new(Peer::Left);
+    let mut r = TestRtc::new(Peer::Right);
+
+    l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
+    r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
+
+    let mid = negotiate(&mut l, &mut r, |change| {
+        change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None)
+    });
+
+    loop {
+        if l.is_connected() && r.is_connected() {
+            break;
+        }
+        progress(&mut l, &mut r)?;
+    }
+
+    let max = l.last.max(r.last);
+    l.last = max;
+    r.last = max;
+
+    let pt = l.params_vp8().pt();
+    let mut requests = 0;
+    for round in 0..2 {
+        for i in 0..20 {
+            let wallclock = l.start + l.duration();
+            let time = l.duration().into();
+            l.writer(mid)
+                .unwrap()
+                .write(pt, wallclock, time, vec![0x10, 0x00, 0x00, i as u8])?;
+            progress(&mut l, &mut r)?;
+        }
+
+        r.writer(mid)
+            .unwrap()
+            .request_keyframe(None, KeyframeRequestKind::Pli)?;
+
+        for _ in 0..100 {
+            progress(&mut l, &mut r)?;
+            requests = l
+                .events
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::KeyframeRequest(req) if req.mid == mid))
+                .count();
+            if requests > round {
+                break;
+            }
+        }
+        assert_eq!(
+            requests,
+            round + 1,
+            "keyframe request {} not reported",
+            round + 1
+        );
+    }
+
+    Ok(())
+}
