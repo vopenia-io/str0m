@@ -55,7 +55,9 @@ impl Pacer for NullPacer {
         self.needs_timeout_before_next_poll = false;
         self.sent_since_refresh = false;
         self.queue_states.clear();
-        self.queue_states.extend(iter);
+        // Only queues holding packets are ever polled.
+        self.queue_states
+            .extend(iter.filter(|q| q.snapshot.packet_count > 0));
 
         None
     }
