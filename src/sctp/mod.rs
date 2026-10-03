@@ -56,6 +56,9 @@ pub(crate) struct RtcSctp {
     remote_max_message_size: u32,
     snap_enabled: bool,
     snap_init: Option<SctpInitData>,
+    /// Something changed since the last poll that found nothing: polled for
+    /// every output of Rtc, the association is only walked then.
+    poll_needed: bool,
     #[cfg(test)]
     max_payload_size: usize,
 }
@@ -313,6 +316,7 @@ impl RtcSctp {
             remote_max_message_size: DEFAULT_REMOTE_MAX_MESSAGE_SIZE,
             snap_enabled: false,
             snap_init: None,
+            poll_needed: true,
             #[cfg(test)]
             max_payload_size,
         }
@@ -342,6 +346,7 @@ impl RtcSctp {
         sctp_init_data: Option<SctpInitData>,
         remote_max_message_size: Option<u32>,
     ) -> Result<(), SctpError> {
+        self.poll_needed = true;
         if self.state != RtcSctpState::Uninited {
             return Err(SctpError::Proto(ProtoError::Other(
                 "SCTP already initialized".into(),
@@ -418,6 +423,7 @@ impl RtcSctp {
 
     /// Enable SNAP by pre-populating the init data.
     pub fn enable_snap(&mut self) {
+        self.poll_needed = true;
         self.snap_enabled = true;
         self.snap_init.get_or_insert_with(SctpInitData::new);
     }
@@ -430,6 +436,7 @@ impl RtcSctp {
     /// Ensure the local SNAP INIT chunk is generated. Returns `false` if
     /// generation failed (degrades to non-SNAP).
     pub fn ensure_local_snap_init(&mut self) -> bool {
+        self.poll_needed = true;
         let init_data = self.snap_init.get_or_insert_with(SctpInitData::new);
         if init_data.local_init_chunk().is_err() {
             self.snap_init = None;
@@ -443,6 +450,7 @@ impl RtcSctp {
     ///
     /// This preserves local opt-in for future offers.
     pub fn disable_pending_snap(&mut self) {
+        self.poll_needed = true;
         if !self.is_inited() {
             self.snap_init = None;
         }
@@ -480,6 +488,7 @@ impl RtcSctp {
     /// Set the remote SNAP INIT from a base64 string. Returns `Ok(true)` if
     /// accepted, `Ok(false)` on decode error (degrades to non-SNAP).
     pub fn set_remote_snap_init_string(&mut self, value: &str) -> bool {
+        self.poll_needed = true;
         let init_data = self.snap_init.get_or_insert_with(SctpInitData::new);
         match init_data.set_remote_init_string(value) {
             Ok(()) => true,
@@ -502,6 +511,7 @@ impl RtcSctp {
 
     /// Opens a new stream.
     pub fn open_stream(&mut self, id: u16, config: ChannelConfig) {
+        self.poll_needed = true;
         // The channel might already have arrived via SCTP, and if it is negotiated out-of-band
         // we are waiting for the configuration.
         let entry = stream_entry(
@@ -556,6 +566,7 @@ impl RtcSctp {
 
     /// Close stream.
     pub fn close_stream(&mut self, id: u16) {
+        self.poll_needed = true;
         if let Some(entry) = entry_by_id_mut(&mut self.entries, id) {
             entry.do_close = true;
 
@@ -565,6 +576,7 @@ impl RtcSctp {
     }
 
     pub fn close(&mut self) -> Result<(), SctpError> {
+        self.poll_needed = true;
         let Some(assoc) = &mut self.assoc else {
             return Ok(());
         };
@@ -590,6 +602,7 @@ impl RtcSctp {
 
     // TODO: fix sctp-proto so we don't need &mut here.
     pub fn available(&mut self) -> usize {
+        self.poll_needed = true;
         let Some(assoc) = &mut self.assoc else {
             return 0;
         };
@@ -610,6 +623,7 @@ impl RtcSctp {
     }
 
     pub fn write(&mut self, id: u16, binary: bool, buf: &[u8]) -> Result<usize, SctpError> {
+        self.poll_needed = true;
         if self.state != RtcSctpState::Established || self.is_closing() || self.is_closed() {
             return Err(SctpError::WriteBeforeEstablished);
         }
@@ -643,6 +657,7 @@ impl RtcSctp {
     }
 
     pub fn buffered_amount(&mut self, id: u16) -> usize {
+        self.poll_needed = true;
         let Some(assoc) = self.assoc.as_mut() else {
             return 0;
         };
@@ -655,6 +670,7 @@ impl RtcSctp {
     }
 
     pub fn set_buffered_amount_low_threshold(&mut self, id: u16, threshold: usize) {
+        self.poll_needed = true;
         let entry =
             entry_by_id_mut(&mut self.entries, id).expect("stream entry for valid channel id");
 
@@ -663,6 +679,7 @@ impl RtcSctp {
     }
 
     pub fn handle_input(&mut self, now: Instant, data: &[u8]) {
+        self.poll_needed = true;
         trace!("Handle input: {}", data.len());
 
         // TODO, remove Bytes in sctp and just use &[u8].
@@ -707,14 +724,28 @@ impl RtcSctp {
         // Remove closed entries.
         self.entries.retain(|e| e.state != StreamEntryState::Closed);
 
+        if self
+            .entries
+            .iter()
+            .any(|e| e.state == StreamEntryState::AwaitOpen && e.open_deadline.is_some())
+        {
+            // An open being retried.
+            self.poll_needed = true;
+        }
+
         let Some(assoc) = &mut self.assoc else {
             return;
         };
+
+        if assoc.poll_timeout().is_some_and(|at| at <= now) {
+            self.poll_needed = true;
+        }
 
         assoc.handle_timeout(now);
 
         // propagate events between endpoint and association.
         while let Some(e) = assoc.poll_endpoint_event() {
+            self.poll_needed = true;
             if let Some(ae) = self.endpoint.handle_event(self.handle, e) {
                 assoc.handle_event(ae);
             }
@@ -722,7 +753,11 @@ impl RtcSctp {
     }
 
     pub fn poll(&mut self) -> Option<SctpEvent> {
+        if !self.poll_needed {
+            return None;
+        }
         let r = self.do_poll();
+        self.poll_needed = r.is_some();
 
         if let Some(r) = &r {
             trace!("Poll {:?}", r);
@@ -1153,6 +1188,7 @@ impl RtcSctp {
     }
 
     pub fn push_back_transmit(&mut self, data: VecDeque<Vec<u8>>) {
+        self.poll_needed = true;
         trace!("Push back transmit: {}", data.len());
         assert!(self.pushed_back_transmit.is_none());
         self.pushed_back_transmit = Some(data);

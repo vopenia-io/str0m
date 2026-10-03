@@ -658,3 +658,65 @@ pub fn channel_config_with_protocol() -> Result<(), RtcError> {
 
     Ok(())
 }
+
+/// Data channel messages lost on the way are retransmitted: the SCTP
+/// retransmission timer must lead to a poll even without new input.
+#[test]
+pub fn data_channel_messages_survive_loss() -> Result<(), RtcError> {
+    use netem::{Probability, RandomLoss};
+
+    init_log();
+    init_crypto_default();
+
+    let mut l = TestRtc::new(Peer::Left);
+    let mut r = TestRtc::new(Peer::Right);
+
+    l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
+    r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
+
+    let mut change = l.sdp_api();
+    let cid = change.add_channel("lossy".into());
+    let (offer, pending) = change.apply().unwrap();
+
+    let answer = r.rtc.sdp_api().accept_offer(offer)?;
+    l.rtc.sdp_api().accept_answer(pending, answer)?;
+
+    loop {
+        if r.events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::ChannelOpen(..)))
+        {
+            break;
+        }
+        progress(&mut l, &mut r)?;
+    }
+
+    r.set_netem(
+        NetemConfig::new()
+            .loss(RandomLoss::new(Probability::new(0.3)))
+            .seed(7),
+    );
+
+    let sent = 20;
+    for i in 0..sent {
+        l.channel(cid)
+            .expect("open channel")
+            .write(false, format!("message {i}").as_bytes())
+            .expect("to write");
+        progress(&mut l, &mut r)?;
+    }
+
+    let until = l.last + Duration::from_secs(20);
+    while l.last < until {
+        progress(&mut l, &mut r)?;
+    }
+
+    let received = r
+        .events
+        .iter()
+        .filter(|(_, e)| matches!(e, Event::ChannelData(_)))
+        .count();
+    assert_eq!(received, sent);
+
+    Ok(())
+}
