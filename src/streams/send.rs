@@ -1030,6 +1030,13 @@ impl StreamTx {
         now >= self.sender_report_at(intervals)
     }
 
+    /// True if the sender report is due within half an interval from `now`:
+    /// reported together with another stream's, the reports of all streams
+    /// converge into one compound packet per interval.
+    pub(crate) fn need_sr_soon(&self, now: Instant, intervals: RtcpReportIntervals) -> bool {
+        self.need_sr(now + intervals.for_audio(self.is_audio()) / 2, intervals)
+    }
+
     pub(crate) fn create_sr_and_update(&mut self, now: Instant, feedback: &mut VecDeque<Rtcp>) {
         let sr = self.create_sender_report(now);
 

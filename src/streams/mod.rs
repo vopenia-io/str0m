@@ -465,9 +465,11 @@ impl Streams {
         }
 
         self.mids_to_report.clear(); // start over for StreamTx.
-        for stream in self.streams_tx.values() {
-            if stream.need_sr(now, intervals) {
-                self.mids_to_report.push(stream.mid());
+        if self.streams_tx.values().any(|s| s.need_sr(now, intervals)) {
+            for stream in self.streams_tx.values() {
+                if stream.need_sr_soon(now, intervals) {
+                    self.mids_to_report.push(stream.mid());
+                }
             }
         }
 
