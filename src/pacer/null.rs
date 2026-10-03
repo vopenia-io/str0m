@@ -14,6 +14,8 @@ pub struct NullPacer {
     last_sends: HashMap<MidRid, Instant>,
     queue_states: Vec<QueueState>,
     needs_timeout_before_next_poll: bool,
+    /// A packet was polled since the queue states were last refreshed.
+    sent_since_refresh: bool,
 }
 
 impl Default for NullPacer {
@@ -22,6 +24,7 @@ impl Default for NullPacer {
             last_sends: HashMap::default(),
             queue_states: Vec::default(),
             needs_timeout_before_next_poll: true,
+            sent_since_refresh: false,
         }
     }
 }
@@ -50,6 +53,7 @@ impl Pacer for NullPacer {
         iter: impl Iterator<Item = QueueState>,
     ) -> Option<PaddingRequest> {
         self.needs_timeout_before_next_poll = false;
+        self.sent_since_refresh = false;
         self.queue_states.clear();
         self.queue_states.extend(iter);
 
@@ -57,20 +61,27 @@ impl Pacer for NullPacer {
     }
 
     fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
+        let last_sends = &self.last_sends;
         let non_empty_queues = self
             .queue_states
-            .iter()
+            .iter_mut()
             .filter(|q| q.snapshot.packet_count > 0);
         // Pick a queue using round robin, prioritize the least recently sent on queue.
-        let to_send_on = non_empty_queues.min_by_key(|q| self.last_sends.get(&q.midrid));
+        let to_send_on = non_empty_queues.min_by_key(|q| last_sends.get(&q.midrid));
 
-        let result = to_send_on.map(|q| (q.midrid, None));
+        // Keep polling from this snapshot, counting the packet as taken;
+        // refresh the queue states once it is used up, not after every
+        // packet: a refresh walks every stream.
+        let Some(queue) = to_send_on else {
+            if self.sent_since_refresh {
+                self.needs_timeout_before_next_poll = true;
+            }
+            return None;
+        };
+        queue.snapshot.packet_count -= 1;
+        self.sent_since_refresh = true;
 
-        if result.is_some() {
-            self.needs_timeout_before_next_poll = true;
-        }
-
-        result
+        Some((queue.midrid, None))
     }
 
     fn register_send(&mut self, now: Instant, _packet_size: DataSize, from: MidRid) {

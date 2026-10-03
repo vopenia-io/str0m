@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Without BWE, send every queued packet after one timeout instead of one timeout per packet
   * Send the sender reports of streams due within half an interval together, in one compound packet
   * Take a packet with the RTX payload type as a repair packet even when it carries a RID header
 
