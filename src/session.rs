@@ -63,6 +63,10 @@ pub(crate) struct Session {
     // might be spliced in somewhere.
     pub medias: Vec<Media>,
 
+    /// A media may have a pending MediaAdded or MediaChanged event: one was
+    /// added, or its direction changed, since the last poll found none.
+    pub(crate) media_events: bool,
+
     // The actual RTP encoded streams.
     pub streams: Streams,
 
@@ -213,6 +217,7 @@ impl Session {
             media_bytes_rx: 0,
             media_bytes_tx: 0,
             ice_lite: config.ice_lite,
+            media_events: false,
             rtp_mode: config.rtp_mode,
             vp9_packetizer_mode: config.vp9_packetizer_mode,
             feedback_tx: VecDeque::new(),
@@ -1013,6 +1018,9 @@ impl Session {
             }));
         }
 
+        if !self.media_events {
+            return None;
+        }
         for media in &mut self.medias {
             if media.need_open_event {
                 media.need_open_event = false;
@@ -1033,6 +1041,7 @@ impl Session {
                 }));
             }
         }
+        self.media_events = false;
 
         None
     }
@@ -1347,6 +1356,7 @@ impl Session {
 
     pub fn add_media(&mut self, media: Media) {
         self.medias.push(media);
+        self.media_events = true;
     }
 
     pub fn medias(&self) -> &[Media] {
@@ -1425,6 +1435,7 @@ impl Session {
     }
 
     pub fn set_direction(&mut self, mid: Mid, direction: Direction) -> bool {
+        self.media_events = true;
         let Some(media) = self.media_by_mid_mut(mid) else {
             return false;
         };

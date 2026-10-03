@@ -1122,6 +1122,8 @@ fn sync_medias<'a>(
                         &mut session.streams,
                         bundle_mids,
                     );
+                    // The direction may have changed.
+                    session.media_events = true;
 
                     continue;
                 }
