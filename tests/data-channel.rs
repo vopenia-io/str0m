@@ -746,10 +746,15 @@ pub fn data_channel_accepts_a_256_kib_message() -> Result<(), RtcError> {
         .events
         .iter()
         .any(|(_, e)| matches!(e, Event::ChannelOpen(..)))
-        || l.channel(cid).map_or(usize::MAX, |mut c| c.buffered_amount()) > 0
+        || l.channel(cid)
+            .map_or(usize::MAX, |mut c| c.buffered_amount())
+            > 0
     {
         progress(&mut l, &mut r)?;
-        assert!(l.duration() < Duration::from_secs(10), "channel never opened");
+        assert!(
+            l.duration() < Duration::from_secs(10),
+            "channel never opened"
+        );
     }
 
     let message = vec![7u8; 256 * 1024];
@@ -763,7 +768,10 @@ pub fn data_channel_accepts_a_256_kib_message() -> Result<(), RtcError> {
         .any(|(_, e)| matches!(e, Event::ChannelData(d) if d.data == message))
     {
         progress(&mut l, &mut r)?;
-        assert!(l.duration() < Duration::from_secs(20), "message never arrived");
+        assert!(
+            l.duration() < Duration::from_secs(20),
+            "message never arrived"
+        );
     }
 
     Ok(())
