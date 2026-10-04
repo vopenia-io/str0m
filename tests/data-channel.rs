@@ -720,3 +720,51 @@ pub fn data_channel_messages_survive_loss() -> Result<(), RtcError> {
 
     Ok(())
 }
+
+/// A message as large as the `max-message-size` Chrome advertises fits in
+/// the send buffer.
+#[test]
+pub fn data_channel_accepts_a_256_kib_message() -> Result<(), RtcError> {
+    init_log();
+    init_crypto_default();
+
+    let mut l = TestRtc::new(Peer::Left);
+    let mut r = TestRtc::new(Peer::Right);
+
+    l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
+    r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
+
+    let mut change = l.sdp_api();
+    let cid = change.add_channel("large".into());
+    let (offer, pending) = change.apply().unwrap();
+
+    let answer = r.rtc.sdp_api().accept_offer(offer)?;
+    l.rtc.sdp_api().accept_answer(pending, answer)?;
+
+    // Open, with the DCEP handshake acknowledged: nothing buffered.
+    while !r
+        .events
+        .iter()
+        .any(|(_, e)| matches!(e, Event::ChannelOpen(..)))
+        || l.channel(cid).map_or(usize::MAX, |mut c| c.buffered_amount()) > 0
+    {
+        progress(&mut l, &mut r)?;
+        assert!(l.duration() < Duration::from_secs(10), "channel never opened");
+    }
+
+    let message = vec![7u8; 256 * 1024];
+    let mut chan = l.channel(cid).expect("an open channel");
+    assert!(!chan.write(true, &vec![7u8; 256 * 1024 + 1])?);
+    assert!(chan.write(true, &message)?);
+
+    while !r
+        .events
+        .iter()
+        .any(|(_, e)| matches!(e, Event::ChannelData(d) if d.data == message))
+    {
+        progress(&mut l, &mut r)?;
+        assert!(l.duration() < Duration::from_secs(20), "message never arrived");
+    }
+
+    Ok(())
+}

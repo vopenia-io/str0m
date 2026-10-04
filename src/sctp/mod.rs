@@ -26,8 +26,10 @@ use dcep::DcepOpen;
 mod error;
 pub use error::SctpError;
 
-/// Bytes that can be buffered inside str0m across all streams.
-const MAX_BUFFERED_ACROSS_STREAMS: usize = 128 * 1024;
+/// Bytes that can be buffered inside str0m across all streams. It also caps
+/// the largest message `Channel::write` accepts, so it matches the
+/// `max-message-size` Chrome advertises.
+const MAX_BUFFERED_ACROSS_STREAMS: usize = 256 * 1024;
 
 /// Maximum message size we advertise in SDP (what we can receive)
 pub const LOCAL_MAX_MESSAGE_SIZE: u32 = 256 * 1024;
