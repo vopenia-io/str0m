@@ -1,5 +1,7 @@
 //! Bandwidth estimation.
 
+use std::time::Instant;
+
 use crate::{Rtc, rtp_::Mid};
 
 pub use crate::rtp_::Bitrate;
@@ -33,6 +35,24 @@ pub enum BweKind {
         /// Media section associated with the report.
         mid: Mid,
     },
+}
+
+/// A sent packet as transport-wide feedback reported it, for an estimator of
+/// the application's own. See
+/// [`RtcConfig::set_twcc_feedback_capacity`][crate::RtcConfig::set_twcc_feedback_capacity].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwccFeedback {
+    /// Transport-wide sequence number, extended.
+    pub seq: u64,
+    /// When the packet was polled out.
+    pub send_time: Instant,
+    /// Bytes of the RTP packet.
+    pub size: usize,
+    /// When the remote received it, in its own clock mapped to this one;
+    /// `None` if reported lost.
+    pub remote_recv_time: Option<Instant>,
+    /// The probe cluster it was sent in, if any.
+    pub probe_cluster: Option<u64>,
 }
 
 /// Access to the Bandwidth Estimate subsystem.
@@ -70,5 +90,23 @@ impl<'a> Bwe<'a> {
     /// the estimator attempts to discover.
     pub fn reset(&mut self, init_bitrate: Bitrate) {
         self.0.session.reset_bwe(init_bitrate);
+    }
+
+    /// The next transport-wide feedback record, oldest first, when
+    /// [`RtcConfig::set_twcc_feedback_capacity`][crate::RtcConfig::set_twcc_feedback_capacity]
+    /// keeps them.
+    pub fn poll_feedback(&mut self) -> Option<TwccFeedback> {
+        self.0.session.poll_twcc_feedback()
+    }
+
+    /// Tags the packets sent from now on with this probe cluster, `None` to
+    /// stop, when the BWE's own pacer runs no probe.
+    pub fn set_probe_cluster(&mut self, cluster: Option<u64>) {
+        self.0.session.set_probe_cluster(cluster);
+    }
+
+    /// The transport-wide sequence number of the last packet sent, if any.
+    pub fn last_sent_seq(&self) -> Option<u64> {
+        self.0.session.last_twcc_seq_sent()
     }
 }

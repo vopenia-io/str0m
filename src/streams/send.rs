@@ -1224,6 +1224,15 @@ impl StreamTx {
         self.pt_for_padding
     }
 
+    /// Asks for `bytes` of padding to go out on this stream: resends of
+    /// recent packets on RTX, or padding-only packets. Returns `false` if the
+    /// stream cannot pad (no RTX, or no packet sent yet to learn its payload
+    /// type from). An application probing the channel uses it.
+    pub fn request_padding(&mut self, bytes: usize) -> bool {
+        self.generate_padding(bytes);
+        self.padding_enabled()
+    }
+
     pub(crate) fn generate_padding(&mut self, padding: usize) {
         if !self.padding_enabled() {
             return;

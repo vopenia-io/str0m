@@ -1188,6 +1188,11 @@ impl TwccSendRegister {
     ///
     /// Returns iterator over [`TwccSendRecord`]s included in the given [`Twcc`]
     /// except for ones that was already acked and returned before.
+    /// The sequence number of the last packet registered, if any.
+    pub fn last_registered(&self) -> Option<u64> {
+        (!self.queue.is_empty()).then_some(*self.last_registered)
+    }
+
     pub fn apply_report(
         &mut self,
         twcc: Twcc,

@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Without BWE, keep transport-wide feedback records for an estimator of the application (`RtcConfig::set_twcc_feedback_capacity`, `Bwe::poll_feedback`), let it tag probe clusters (`Bwe::set_probe_cluster`) and pad a stream (`StreamTx::request_padding`)
   * Configure the BWE pacing rate as a multiple of the estimate, `RtcConfig::set_bwe_pacing_factor` (default 1.1, libwebrtc uses 2.5)
   * With BWE, send the packets the pacer lets out at once after one timeout instead of one timeout per packet; probes and forced queue drains keep one per packet
   * Hash the stream maps looked up for every packet with foldhash instead of SipHash

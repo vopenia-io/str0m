@@ -46,6 +46,7 @@ pub struct RtcConfig {
     pub(crate) intervals: RtcpReportIntervals,
     pub(crate) bwe_config: Option<BweConfig>,
     pub(crate) bwe_pacing_factor: f64,
+    pub(crate) twcc_feedback_capacity: usize,
     pub(crate) reordering_size_audio: usize,
     pub(crate) reordering_size_video: usize,
     pub(crate) reordering_timeout_audio: Option<Duration>,
@@ -508,6 +509,26 @@ impl RtcConfig {
         self
     }
 
+    /// Keeps up to `capacity` transport-wide feedback records for the
+    /// application, read with [`Bwe::poll_feedback()`][crate::bwe::Bwe::poll_feedback],
+    /// so it can run its own estimator. Only without BWE: with it, the records
+    /// go to the BWE alone. The oldest records go first when the application
+    /// falls behind. Defaults to 0: none kept.
+    pub fn set_twcc_feedback_capacity(mut self, capacity: usize) -> Self {
+        self.twcc_feedback_capacity = capacity;
+        self
+    }
+
+    /// The capacity set by [`Self::set_twcc_feedback_capacity()`].
+    ///
+    /// ```
+    /// # use str0m::Rtc;
+    /// assert_eq!(Rtc::builder().twcc_feedback_capacity(), 0);
+    /// ```
+    pub fn twcc_feedback_capacity(&self) -> usize {
+        self.twcc_feedback_capacity
+    }
+
     /// The pacing factor set by [`Self::set_bwe_pacing_factor()`].
     ///
     /// ```
@@ -882,6 +903,7 @@ impl Default for RtcConfig {
             },
             bwe_config: None,
             bwe_pacing_factor: DEFAULT_PACING_FACTOR,
+            twcc_feedback_capacity: 0,
             reordering_size_audio: 15,
             reordering_size_video: 30,
             reordering_timeout_audio: Some(Duration::from_secs(1)),

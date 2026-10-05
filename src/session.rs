@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::Event;
-use crate::bwe::BweKind;
+use crate::bwe::{BweKind, TwccFeedback};
 use crate::bwe_::Bwe;
 use crate::config::KeyingMaterial;
 use crate::config_mod::RtcpReportIntervals;
@@ -30,6 +30,7 @@ use crate::rtp_::Pli;
 use crate::rtp_::Pt;
 use crate::rtp_::SRTCP_OVERHEAD;
 use crate::rtp_::SeqNo;
+use crate::rtp_::TwccClusterId;
 use crate::rtp_::{Bitrate, ExtensionMap, Goodbye, Mid, ReportList, Rtcp, RtcpFb};
 use crate::rtp_::{Dlrr, DlrrItem, ExtendedReport, ReportBlock};
 use crate::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
@@ -103,6 +104,14 @@ pub(crate) struct Session {
 
     bwe: Option<Bwe>,
     bwe_last_event: Option<(Bitrate, bool)>,
+
+    /// Transport-wide feedback records for the application, when its own
+    /// estimator replaces the BWE: bounded, the oldest dropped first.
+    twcc_feedback: VecDeque<TwccFeedback>,
+    twcc_feedback_capacity: usize,
+    /// Probe cluster set by the application, tagging the packets sent when
+    /// the pacer runs none.
+    probe_cluster: Option<TwccClusterId>,
 
     enable_twcc_feedback: bool,
 
@@ -209,6 +218,9 @@ impl Session {
             max_rx_seq_lookup: HashMap::new(),
             bwe,
             bwe_last_event: None,
+            twcc_feedback: VecDeque::new(),
+            twcc_feedback_capacity: config.twcc_feedback_capacity,
+            probe_cluster: None,
             enable_twcc_feedback: false,
             pacer,
             pacer_control: PacerControl::new(config.bwe_pacing_factor),
@@ -895,8 +907,23 @@ impl Session {
                 trace!("Handle TWCC: {:?}", twcc);
                 let maybe_records = self.twcc_tx_register.apply_report(twcc, now);
 
-                if let (Some(maybe_records), Some(bwe)) = (maybe_records, &mut self.bwe) {
-                    bwe.update(maybe_records, now);
+                if let Some(records) = maybe_records {
+                    if let Some(bwe) = &mut self.bwe {
+                        bwe.update(records, now);
+                    } else if self.twcc_feedback_capacity > 0 {
+                        for record in records {
+                            if self.twcc_feedback.len() >= self.twcc_feedback_capacity {
+                                self.twcc_feedback.pop_front();
+                            }
+                            self.twcc_feedback.push_back(TwccFeedback {
+                                seq: *record.seq(),
+                                send_time: record.local_send_time(),
+                                size: record.size(),
+                                remote_recv_time: record.remote_recv_time(),
+                                probe_cluster: record.cluster().map(|c| *c),
+                            });
+                        }
+                    }
                 }
                 need_configure_pacer = true;
 
@@ -1164,6 +1191,7 @@ impl Session {
         // Figure out which, if any, queue to poll
         // The cluster_id is captured by the pacer at poll time, before register_send() might clear it
         let (midrid, cluster_id) = self.pacer.poll_queue()?;
+        let cluster_id = cluster_id.or(self.probe_cluster);
         let stream = self.streams.stream_tx_by_midrid(midrid)?;
         let Some(media) = self.medias.iter().find(|m| m.mid() == stream.mid()) else {
             trace!("Pacer pointed to mid {} which has no media", midrid.mid());
@@ -1334,6 +1362,18 @@ impl Session {
         snapshot.egress_loss_fraction = self.twcc_tx_register.loss(Duration::from_secs(1), now);
         snapshot.rtt = self.twcc_tx_register.rtt();
         snapshot.ingress_loss_fraction = self.twcc_rx_register.loss();
+    }
+
+    pub fn poll_twcc_feedback(&mut self) -> Option<TwccFeedback> {
+        self.twcc_feedback.pop_front()
+    }
+
+    pub fn set_probe_cluster(&mut self, cluster: Option<u64>) {
+        self.probe_cluster = cluster.map(TwccClusterId::from);
+    }
+
+    pub fn last_twcc_seq_sent(&self) -> Option<u64> {
+        self.twcc_tx_register.last_registered()
     }
 
     pub fn set_bwe_desired_bitrate(&mut self, desired_bitrate: Bitrate) {
