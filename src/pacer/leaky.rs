@@ -137,7 +137,7 @@ impl Pacer for LeakyBucketPacer {
         Some((next, cluster_id))
     }
 
-    fn register_send(&mut self, now: Instant, packet_size: DataSize, _from: MidRid) {
+    fn register_send(&mut self, now: Instant, packet_size: DataSize, from: MidRid) {
         self.last_emitted = Some(now);
 
         self.media_debt += packet_size;
@@ -157,6 +157,8 @@ impl Pacer for LeakyBucketPacer {
         if let Some(cluster_id) = self.check_probe_complete_internal(now) {
             self.completed_probe = Some(cluster_id);
         }
+
+        self.continue_from_snapshot(now, packet_size, from);
     }
 }
 
@@ -218,6 +220,43 @@ impl LeakyBucketPacer {
         }
 
         None
+    }
+
+    /// Picks the next packet from the queue states of the last timeout, with
+    /// the packet just sent taken out, when it can go out at once. A timeout
+    /// walks every stream: without this, a peer with many send streams (an
+    /// SFU subscriber) pays one walk per packet. Probes time each packet, and
+    /// a forced drain of a late queue recomputes its rate after each packet:
+    /// both keep a timeout per packet.
+    fn continue_from_snapshot(&mut self, now: Instant, packet_size: DataSize, from: MidRid) {
+        if let Some(queue) = self.queue_states.iter_mut().find(|q| q.midrid == from) {
+            let snapshot = &mut queue.snapshot;
+            snapshot.packet_count = snapshot.packet_count.saturating_sub(1);
+            snapshot.byte_size = snapshot
+                .byte_size
+                .saturating_sub(packet_size.as_bytes_usize());
+            snapshot.last_emitted = Some(now);
+            if snapshot.packet_count == 0 {
+                snapshot.first_unsent = None;
+            }
+        }
+
+        if !self.probe_queue.is_empty() || self.completed_probe.is_some() {
+            return;
+        }
+        if self.adjusted_bitrate > self.pacing_bitrate {
+            return;
+        }
+
+        let Some(((at, _), Some(queue))) = self.next_poll(now) else {
+            return;
+        };
+        if at > now {
+            return;
+        }
+
+        self.next_poll_queue = Some(queue.midrid);
+        self.needs_timeout_before_next_poll = false;
     }
 
     fn update_handle_time_and_get_elapsed(&mut self, now: Instant) -> Duration {

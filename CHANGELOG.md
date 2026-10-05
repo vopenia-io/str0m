@@ -1,5 +1,6 @@
 # Unreleased
 
+  * With BWE, send the packets the pacer lets out at once after one timeout instead of one timeout per packet; probes and forced queue drains keep one per packet
   * Hash the stream maps looked up for every packet with foldhash instead of SipHash
   * Parse SDP without detailed errors first, five times faster on large SDPs; a failed parse is run again for the message
   * Look for media added or changed events only after a media was added or changed
