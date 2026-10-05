@@ -133,6 +133,12 @@ pub(crate) struct Streams {
     /// where the incoming SSRC is for an RTX and we want the "main".
     rx_lookup: HashMap<Ssrc, RxLookup>,
 
+    /// RTX SSRC of each main SSRC, as the remote SDP pairs them (`a=ssrc-group:FID`)
+    /// for media mapped by RID. Some senders (pion) attach neither MID nor RID to their
+    /// RTX packets once the receiver reported on the main SSRC: only this pairing maps
+    /// them.
+    declared_rtx: HashMap<Ssrc, Ssrc>,
+
     /// Time we last cleaned up unused entries from source_keys_rx.
     last_rx_lookup_cleanup: Instant,
 
@@ -239,6 +245,9 @@ const RX_LOOKUP_CLEANUP_INTERVAL: Duration = Duration::from_millis(10_000);
 /// How old an RxLookup entry may be.
 const RX_LOOKUP_EXPIRY: Duration = Duration::from_millis(30_000);
 
+/// Most RTX pairings kept from remote SDPs.
+const MAX_DECLARED_RTX: usize = 1024;
+
 #[derive(Debug)]
 struct RxLookup {
     mid: Mid,
@@ -251,6 +260,7 @@ impl Streams {
         Self {
             streams_rx: Default::default(),
             rx_lookup: Default::default(),
+            declared_rtx: Default::default(),
             last_rx_lookup_cleanup: already_happened(),
             streams_tx: Default::default(),
             active_tx: Vec::new(),
@@ -391,6 +401,8 @@ impl Streams {
         // New stream might have enabled nacks.
         self.any_nack_active = None;
 
+        let rtx = rtx.or_else(|| self.declared_rtx.get(&ssrc).copied());
+
         let stream = self
             .streams_rx
             .entry(ssrc)
@@ -403,9 +415,25 @@ impl Streams {
         stream
     }
 
+    /// Pairs main SSRC `ssrc` with RTX SSRC `rtx`, as a remote SDP declared them for a
+    /// media mapped by RID. A stream already receiving on `ssrc` without an RTX takes it.
+    pub(crate) fn declare_rtx(&mut self, ssrc: Ssrc, rtx: Ssrc) {
+        if self.declared_rtx.len() >= MAX_DECLARED_RTX && !self.declared_rtx.contains_key(&ssrc) {
+            debug!("Too many declared RTX SSRCs, ignoring {} for {}", rtx, ssrc);
+            return;
+        }
+        self.declared_rtx.insert(ssrc, rtx);
+        if let Some(stream) = self.streams_rx.get_mut(&ssrc) {
+            if stream.rtx().is_none() {
+                stream.maybe_reset_rtx(rtx);
+            }
+        }
+    }
+
     pub fn remove_stream_rx(&mut self, ssrc: Ssrc) -> bool {
         let stream = self.streams_rx.remove(&ssrc);
         let existed = stream.is_some();
+        self.declared_rtx.remove(&ssrc);
 
         self.rx_lookup.retain(|k, l| *k != ssrc && l.main != ssrc);
 

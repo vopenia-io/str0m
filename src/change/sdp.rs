@@ -1382,6 +1382,13 @@ fn update_media(
     // correspond to the order of the simulcast declarations. In this case
     // it's better to fall back on mid/rid dynamic mapping.
     if m.simulcast().is_some() {
+        // An RTX pairing names both SSRCs, it does not depend on that order:
+        // the main SSRC found by its RID takes the RTX declared with it.
+        for i in m.ssrc_info() {
+            if let Some(main) = i.repairs {
+                streams.declare_rtx(main, i.ssrc);
+            }
+        }
         return;
     }
 
