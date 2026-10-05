@@ -13,6 +13,7 @@ use crate::io::DATAGRAM_MTU_TARGET;
 use crate::io::DATAGRAM_MTU_TARGET_MAX;
 use crate::io::DATAGRAM_MTU_TARGET_MIN;
 use crate::io::DATAGRAM_MTU_WARN;
+use crate::pacer::DEFAULT_PACING_FACTOR;
 use crate::rtp_::{Bitrate, Extension, ExtensionMap};
 
 /// Customized config for creating an [`Rtc`] instance.
@@ -44,6 +45,7 @@ pub struct RtcConfig {
     pub(crate) stats_interval: Option<Duration>,
     pub(crate) intervals: RtcpReportIntervals,
     pub(crate) bwe_config: Option<BweConfig>,
+    pub(crate) bwe_pacing_factor: f64,
     pub(crate) reordering_size_audio: usize,
     pub(crate) reordering_size_video: usize,
     pub(crate) reordering_timeout_audio: Option<Duration>,
@@ -491,6 +493,34 @@ impl RtcConfig {
         self.bwe_config.as_ref().map(|c| c.initial_bitrate)
     }
 
+    /// Sets the pacing rate with BWE, as a multiple of the estimate.
+    ///
+    /// Defaults to 1.1. libwebrtc paces at 2.5 times the estimate: a pacing rate
+    /// close to the estimate holds media back as soon as the estimate dips under
+    /// the rate being sent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `factor` is not at least 1.
+    pub fn set_bwe_pacing_factor(mut self, factor: f64) -> Self {
+        assert!(factor >= 1.0, "a pacing factor is at least 1");
+        self.bwe_pacing_factor = factor;
+        self
+    }
+
+    /// The pacing factor set by [`Self::set_bwe_pacing_factor()`].
+    ///
+    /// ```
+    /// # use str0m::Rtc;
+    /// let config = Rtc::builder();
+    ///
+    /// // Defaults to 1.1.
+    /// assert_eq!(config.bwe_pacing_factor(), 1.1);
+    /// ```
+    pub fn bwe_pacing_factor(&self) -> f64 {
+        self.bwe_pacing_factor
+    }
+
     /// Sets the number of packets held back for reordering audio packets.
     ///
     /// Str0m tries to deliver the frames in order. This number determines how many
@@ -851,6 +881,7 @@ impl Default for RtcConfig {
                 video: Duration::from_secs(1),
             },
             bwe_config: None,
+            bwe_pacing_factor: DEFAULT_PACING_FACTOR,
             reordering_size_audio: 15,
             reordering_size_video: 30,
             reordering_timeout_audio: Some(Duration::from_secs(1)),

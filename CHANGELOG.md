@@ -1,5 +1,6 @@
 # Unreleased
 
+  * Configure the BWE pacing rate as a multiple of the estimate, `RtcConfig::set_bwe_pacing_factor` (default 1.1, libwebrtc uses 2.5)
   * With BWE, send the packets the pacer lets out at once after one timeout instead of one timeout per packet; probes and forced queue drains keep one per packet
   * Hash the stream maps looked up for every packet with foldhash instead of SipHash
   * Parse SDP without detailed errors first, five times faster on large SDPs; a failed parse is run again for the message

@@ -1,6 +1,7 @@
 use crate::rtp_::Bitrate;
 
-const PACING_FACTOR: f64 = 1.1;
+/// Pacing rate over the estimate, unless configured otherwise.
+pub(crate) const DEFAULT_PACING_FACTOR: f64 = 1.1;
 
 /// Target padding rate when media is active. This maintains NAT bindings, RTX state,
 /// and allows ALR periodic probes to discover higher bandwidth.
@@ -18,11 +19,13 @@ pub(crate) struct PacingResult {
 }
 
 /// Controls the pacing and padding rates.
-pub(crate) struct PacerControl {}
+pub(crate) struct PacerControl {
+    pacing_factor: f64,
+}
 
 impl PacerControl {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(pacing_factor: f64) -> Self {
+        Self { pacing_factor }
     }
 
     pub fn calculate(
@@ -46,7 +49,7 @@ impl PacerControl {
         // Set pacing rate to smooth out media transmission (burst avoidance).
         // Must be at least the current BWE estimate * factor, but also high enough
         // to allow the padding we want to send.
-        let min_pacing_rate = estimate * PACING_FACTOR;
+        let min_pacing_rate = estimate * self.pacing_factor;
         let pacing_rate = min_pacing_rate.max(padding_rate);
 
         PacingResult {
@@ -61,8 +64,17 @@ mod test {
     use super::*;
 
     #[test]
+    fn pacing_follows_the_configured_factor() {
+        let estimate = Bitrate::kbps(1_000);
+        let default = PacerControl::new(DEFAULT_PACING_FACTOR).calculate(true, estimate, false);
+        assert_eq!(default.pacing_rate, Bitrate::kbps(1_100));
+        let libwebrtc = PacerControl::new(2.5).calculate(true, estimate, false);
+        assert_eq!(libwebrtc.pacing_rate, Bitrate::kbps(2_500));
+    }
+
+    #[test]
     fn padding_enabled_with_active_media() {
-        let c = PacerControl::new();
+        let c = PacerControl::new(DEFAULT_PACING_FACTOR);
         let estimate = Bitrate::kbps(1_000);
 
         let r = c.calculate(true, estimate, false);
@@ -72,7 +84,7 @@ mod test {
 
     #[test]
     fn no_padding_without_active_media() {
-        let c = PacerControl::new();
+        let c = PacerControl::new(DEFAULT_PACING_FACTOR);
         let estimate = Bitrate::kbps(1_000);
 
         let r = c.calculate(false, estimate, false);
@@ -82,7 +94,7 @@ mod test {
 
     #[test]
     fn overuse_suppresses_padding() {
-        let c = PacerControl::new();
+        let c = PacerControl::new(DEFAULT_PACING_FACTOR);
         let estimate = Bitrate::mbps(40);
 
         let r = c.calculate(true, estimate, true);
