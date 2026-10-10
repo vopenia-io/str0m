@@ -760,6 +760,15 @@ impl PayloadParams {
                 } else {
                     panic!("Exhausted all PT ranges, inconsistent PayloadParam state");
                 }
+            } else if claimed.is_claimed(remote_pt) {
+                // The remote dictated the PTs and gave this one to another codec already (two
+                // m-lines mapping one PT to two codecs). We can't reassign PTs the remote
+                // controls: leave this codec out rather than claim the PT twice.
+                debug!(
+                    "Conflicting remote PT {} for codec {:?}; leaving it out",
+                    remote_pt, self.spec.codec
+                );
+                return;
             }
 
             // Lock down the PT
@@ -784,6 +793,10 @@ impl PayloadParams {
                         }
                     }
                 }
+            } else if remote_rtx.is_some_and(|rtx| claimed.is_claimed(rtx)) {
+                // As for the PT above, but RTX is optional: drop it.
+                debug!("Conflicting remote RTX PT {:?}; dropping it", remote_rtx);
+                remote_rtx = None;
             }
 
             // Lock down the RTX PT
