@@ -26,7 +26,7 @@ pub struct Vp8Patch {
 }
 
 impl Vp8Patch {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             len: 0,
             offsets: [0; VP8_PATCH_BYTES],
@@ -34,7 +34,7 @@ impl Vp8Patch {
         }
     }
 
-    fn push(&mut self, offset: usize, byte: u8) {
+    pub(crate) fn push(&mut self, offset: usize, byte: u8) {
         let index = usize::from(self.len);
         debug_assert!(index < self.offsets.len());
         debug_assert!(offset <= usize::from(u8::MAX));

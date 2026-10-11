@@ -5,7 +5,9 @@ use netem::{NetemConfig, Probability, RandomLoss};
 use str0m::format::Codec;
 use str0m::media::MediaKind;
 use str0m::media::Pt;
-use str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, Ssrc, Vp8Descriptor, Vp8Patch};
+use str0m::rtp::{
+    ExtensionValues, RawPacket, RtpWrite, Ssrc, Vp8Descriptor, Vp8Patch, Vp9Descriptor, Vp9Patch,
+};
 use str0m::{Event, RtcError};
 
 mod common;
@@ -13,6 +15,9 @@ use common::{connect_l_r, init_crypto_default, init_log, progress};
 
 const VP8_PAYLOAD: [u8; 6] = [0x90, 0xf0, 0x01, 0x02, 0xa3, 0x00];
 const VP8_REWRITTEN_PAYLOAD: [u8; 6] = [0x90, 0xf0, 0x7e, 0x44, 0xbf, 0x00];
+// Non-flexible VP9 keyframe start: 15-bit picture ID 0x1234, layer indices, TL0PICIDX 7.
+const VP9_PAYLOAD: [u8; 6] = [0xa8, 0x92, 0x34, 0x00, 0x07, 0xaa];
+const VP9_REWRITTEN_PAYLOAD: [u8; 6] = [0xa8, 0x80, 0x05, 0x00, 0x42, 0xaa];
 
 #[test]
 pub fn rtp_direct_ssrc() -> Result<(), RtcError> {
@@ -322,6 +327,140 @@ pub fn rtp_direct_vp8_patch_survives_rtx() -> Result<(), RtcError> {
     );
 
     Ok(())
+}
+
+#[test]
+pub fn rtp_direct_vp9_patch_survives_rtx() -> Result<(), RtcError> {
+    init_log();
+    init_crypto_default();
+
+    let (mut l, mut r) = connect_l_r();
+
+    let mid = "vid".into();
+    let ssrc: Ssrc = 42.into();
+    let ssrc_rtx: Ssrc = 44.into();
+
+    l.direct_api().declare_media(mid, MediaKind::Video);
+    l.direct_api()
+        .declare_stream_tx(ssrc, Some(ssrc_rtx), mid, None)
+        .set_rtx_cache(32, Duration::from_secs(3), None);
+
+    r.direct_api().declare_media(mid, MediaKind::Video);
+    r.direct_api()
+        .expect_stream_rx(ssrc, Some(ssrc_rtx), mid, None);
+
+    let max = l.last.max(r.last);
+    l.last = max;
+    r.last = max;
+
+    let params = l.params_vp9();
+    assert_eq!(params.spec().codec, Codec::Vp9);
+    let pt = params.pt();
+    let rtx_pt = params.resend().unwrap();
+    let rewritten_seq = 47_002_u64;
+    let original_seq_bytes = (rewritten_seq as u16).to_be_bytes();
+
+    for index in 0_u64..=1 {
+        let wallclock = l.start + l.duration();
+        l.direct_api().stream_tx(&ssrc).unwrap().write_rtp(
+            RtpWrite::new(
+                pt,
+                (47_000 + index).into(),
+                47_000_000 + index as u32 * 1_000,
+                wallclock,
+                [index as u8],
+            )
+            .nackable(true),
+        );
+
+        progress(&mut l, &mut r)?;
+    }
+
+    // The patched packet is lost, then repaired over RTX.
+    r.set_netem(NetemConfig::new().loss(RandomLoss::new(Probability::ONE)));
+
+    let wallclock = l.start + l.duration();
+    l.direct_api().stream_tx(&ssrc).unwrap().write_rtp(
+        RtpWrite::new(pt, rewritten_seq.into(), 47_002_000, wallclock, VP9_PAYLOAD)
+            .nackable(true)
+            .vp9_patch(vp9_patch()),
+    );
+
+    progress(&mut l, &mut r)?;
+    r.set_netem(NetemConfig::new());
+
+    // The next one, patched too, arrives directly.
+    let wallclock = l.start + l.duration();
+    l.direct_api().stream_tx(&ssrc).unwrap().write_rtp(
+        RtpWrite::new(pt, 47_003.into(), 47_003_000, wallclock, VP9_PAYLOAD)
+            .nackable(true)
+            .vp9_patch(vp9_patch()),
+    );
+    progress(&mut l, &mut r)?;
+
+    for index in 4_u64..=7 {
+        let wallclock = l.start + l.duration();
+        l.direct_api().stream_tx(&ssrc).unwrap().write_rtp(
+            RtpWrite::new(
+                pt,
+                (47_000 + index).into(),
+                47_000_000 + index as u32 * 1_000,
+                wallclock,
+                [index as u8],
+            )
+            .nackable(true),
+        );
+
+        progress(&mut l, &mut r)?;
+    }
+
+    let rtx_payload = loop {
+        progress(&mut l, &mut r)?;
+
+        if let Some(payload) = rtx_payload_for_seq(&r.events, rtx_pt, &original_seq_bytes) {
+            break payload;
+        }
+
+        if l.duration() > Duration::from_secs(10) {
+            panic!("rewritten packet should be retransmitted over RTX");
+        }
+    };
+
+    assert_eq!(rtx_payload.get(2..), Some(VP9_REWRITTEN_PAYLOAD.as_slice()));
+
+    let recovered_packet = r.events.iter().find_map(|(_, event)| match event {
+        Event::RtpPacket(packet) if packet.header.sequence_number == rewritten_seq as u16 => {
+            Some(packet)
+        }
+        _ => None,
+    });
+
+    assert_eq!(
+        recovered_packet.map(|packet| packet.payload.as_ref()),
+        Some(VP9_REWRITTEN_PAYLOAD.as_slice())
+    );
+
+    let direct_packet = r.events.iter().find_map(|(_, event)| match event {
+        Event::RtpPacket(packet) if packet.header.sequence_number == 47_003 => Some(packet),
+        _ => None,
+    });
+
+    assert_eq!(
+        direct_packet.map(|packet| packet.payload.as_ref()),
+        Some(VP9_REWRITTEN_PAYLOAD.as_slice())
+    );
+
+    Ok(())
+}
+
+fn vp9_patch() -> Vp9Patch {
+    Vp9Descriptor::parse(&VP9_PAYLOAD)
+        .expect("valid VP9 descriptor")
+        .patch()
+        .picture_id(5)
+        .tl0_pic_idx(0x42)
+        .build()
+        .expect("valid VP9 patch")
 }
 
 fn vp8_patch() -> Vp8Patch {

@@ -784,7 +784,8 @@ pub mod rtp {
 
     pub use crate::packet::{
         RedBlock, RedDecoder, RedEncoder, RedundantBlock, Vp8Descriptor, Vp8DescriptorError,
-        Vp8Patch, Vp8PatchBuilder, Vp8PatchError,
+        Vp8Patch, Vp8PatchBuilder, Vp8PatchError, Vp9Descriptor, Vp9DescriptorError, Vp9Patch,
+        Vp9PatchBuilder, Vp9PatchError,
     };
     pub use crate::rtp_::{RtpHeader, SeqNo, Ssrc, VideoOrientation};
     pub use crate::streams::{

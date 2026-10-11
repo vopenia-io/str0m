@@ -65,6 +65,11 @@ pub use vp9::Vp9PacketizerMode;
 pub use vp9::detect_vp9_keyframe;
 use vp9::{Vp9Depacketizer, Vp9Packetizer};
 
+mod vp9_descriptor;
+pub use vp9_descriptor::{
+    Vp9Descriptor, Vp9DescriptorError, Vp9Patch, Vp9PatchBuilder, Vp9PatchError,
+};
+
 mod null;
 use null::{NullDepacketizer, NullPacketizer};
 

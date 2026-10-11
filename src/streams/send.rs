@@ -14,7 +14,7 @@ use crate::media::MediaKind;
 use crate::pacer::QueuePriority;
 use crate::pacer::QueueSnapshot;
 use crate::pacer::QueueState;
-use crate::packet::Vp8Patch;
+use crate::packet::{Vp8Patch, Vp9Patch};
 use crate::rtp_::MidRid;
 use crate::rtp_::{Bitrate, Descriptions, Extension, ExtensionMap, ExtensionValues, Frequency};
 use crate::rtp_::{MAX_BLANK_PADDING_PAYLOAD_SIZE, Sdes, SdesType};
@@ -294,6 +294,16 @@ impl RtpWrite {
     /// constructing this write command.
     pub fn vp8_patch(mut self, patch: Vp8Patch) -> Self {
         self.vp8_patch = Some(patch);
+        self
+    }
+
+    /// Apply a prevalidated VP9 payload descriptor patch during RTP serialization.
+    ///
+    /// Build the patch with [`Vp9Descriptor::patch`][crate::rtp::Vp9Descriptor::patch].
+    /// It replaces a VP8 patch given to the same write command: both are byte
+    /// replacements in the payload descriptor.
+    pub fn vp9_patch(mut self, patch: Vp9Patch) -> Self {
+        self.vp8_patch = Some(patch.0);
         self
     }
 }
