@@ -204,6 +204,12 @@ pub(crate) mod test {
             progress(&mut a1, &mut a2);
         }
 
+        // Stay connected a while, so that the silence below starts well after the
+        // checks that set the pair up (triggered checks make those early).
+        while a1.time - a1.start_time < Duration::from_secs(1) {
+            progress(&mut a1, &mut a2);
+        }
+
         a1.drop_sent_packets = true;
 
         loop {
@@ -233,9 +239,9 @@ pub(crate) mod test {
         assert_eq!(
             a1.stats(),
             IceAgentStats {
-                bind_request_sent: 11,
-                bind_success_recv: 2,
-                bind_request_recv: 11,
+                bind_request_sent: 12,
+                bind_success_recv: 3,
+                bind_request_recv: 12,
                 discovered_recv_count: 1,
                 nomination_send_count: 1,
             }
@@ -244,9 +250,9 @@ pub(crate) mod test {
         assert_eq!(
             a2.stats(),
             IceAgentStats {
-                bind_request_sent: 11,
-                bind_success_recv: 2,
-                bind_request_recv: 2,
+                bind_request_sent: 12,
+                bind_success_recv: 3,
+                bind_request_recv: 3,
                 discovered_recv_count: 1,
                 nomination_send_count: 1,
             }
@@ -642,12 +648,13 @@ pub(crate) mod test {
             progress(&mut a1, &mut a2);
         }
 
+        // a2, controlled, checks again the pair a1 checked meanwhile.
         assert_eq!(
             a1.stats(),
             IceAgentStats {
                 bind_request_sent: 2,
                 bind_success_recv: 2,
-                bind_request_recv: 1,
+                bind_request_recv: 2,
                 discovered_recv_count: 1,
                 nomination_send_count: 1,
             }
@@ -656,8 +663,8 @@ pub(crate) mod test {
         assert_eq!(
             a2.stats(),
             IceAgentStats {
-                bind_request_sent: 3,
-                bind_success_recv: 1,
+                bind_request_sent: 4,
+                bind_success_recv: 2,
                 bind_request_recv: 2,
                 discovered_recv_count: 1,
                 nomination_send_count: 1,
@@ -884,6 +891,11 @@ pub(crate) mod test {
         assert!(initial_reply.is_successful_binding_response);
         assert!(a1.has_event(|e| matches!(e, IceAgentEvent::NominatedSend { .. })));
 
+        // The controlled side also checks the new pair at once (triggered check,
+        // RFC 8445 §7.3.1.4); that check is lost here.
+        let triggered = a2.poll_next_stun_message();
+        assert!(triggered.is_binding_request);
+
         // Now the controlling side sends the nominated USE-CANDIDATE request.
         progress_without_network(&mut a1, &mut a2);
 
@@ -1019,6 +1031,18 @@ pub(crate) mod test {
         // loop until we're connected.
         loop {
             if a1.state().is_connected() && a2.state().is_connected() {
+                break;
+            }
+            progress(a1, a2);
+        }
+
+        // The controlled side confirms the nomination with a check of its own,
+        // which can come a step after both sides are connected.
+        for _ in 0..100 {
+            let confirmed = |a: &TestAgent| {
+                a.has_event(|e| matches!(e, IceAgentEvent::NominatedSend { .. }))
+            };
+            if confirmed(a1) && confirmed(a2) {
                 break;
             }
             progress(a1, a2);
@@ -1197,6 +1221,18 @@ pub(crate) mod test {
             progress(&mut a1, &mut a2);
         }
 
+        // The controlled side confirms the nomination with a check of its own,
+        // which can come a step after both sides are connected.
+        for _ in 0..100 {
+            let confirmed = |a: &TestAgent| {
+                a.has_event(|e| matches!(e, IceAgentEvent::NominatedSend { .. }))
+            };
+            if confirmed(&a1) && confirmed(&a2) {
+                break;
+            }
+            progress(&mut a1, &mut a2);
+        }
+
         // A1 sends from its host candidate with a random port getting assigned by the symmetric NAT.
         assert!(a1.has_event(|e| {
             matches!(e, IceAgentEvent::NominatedSend { source, destination, .. }
@@ -1237,6 +1273,18 @@ pub(crate) mod test {
 
         loop {
             if a1.state().is_connected() && a2.state().is_connected() {
+                break;
+            }
+            progress(&mut a1, &mut a2);
+        }
+
+        // The controlled side confirms the nomination with a check of its own,
+        // which can come a step after both sides are connected.
+        for _ in 0..100 {
+            let confirmed = |a: &TestAgent| {
+                a.has_event(|e| matches!(e, IceAgentEvent::NominatedSend { .. }))
+            };
+            if confirmed(&a1) && confirmed(&a2) {
                 break;
             }
             progress(&mut a1, &mut a2);

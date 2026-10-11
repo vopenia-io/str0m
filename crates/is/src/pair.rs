@@ -238,6 +238,9 @@ impl CandidatePair {
 
     pub fn nominate(&mut self, force_success: bool) {
         assert!(self.nomination_state == NominationState::None);
+        // A nominated pair skips the queue: a time cached for an attempt in flight
+        // would hold its check back.
+        self.cached_next_attempt_time = None;
         if force_success {
             self.nomination_state = NominationState::Success;
             debug!("Force success nominated pair {:?}", Pii(&self));

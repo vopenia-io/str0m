@@ -1560,10 +1560,9 @@ impl IceAgent {
             // When the pair is already on the checklist:
             trace!("Found existing pair for STUN request: {:?}", pair);
 
-            // TODO: The spec has all these ideas about resetting to Waiting state
-            // for the candidate pair. I think that's to do speeding up the triggered
-            // checks if a nomination comes through. It doesn't seem to make much
-            // sense in this implementation, where a nomination jumps the queue.
+            // A pair still Waiting gets a triggered check below. The spec's other
+            // resets (In-Progress, Failed) are not done: a nomination jumps the
+            // queue anyway.
             // https://datatracker.ietf.org/doc/html/rfc8445#section-7.3.1.4
         } else {
             // If the pair is not already on the checklist:
@@ -1632,6 +1631,23 @@ impl IceAgent {
             pair.nominate(self.ice_lite);
         }
 
+        // Triggered check (RFC 8445 §7.3.1.4): a pair the peer checks before we
+        // did gets our check now rather than in turn, one pair per Ta. A
+        // controlling peer nominates a pair once both directions worked: without
+        // it, one with many candidates waits for its own next round (200 ms for
+        // pion), or for ours to reach this pair.
+        //
+        // A controlled agent also checks again a pair it already checked, until
+        // the peer nominates it: pion nominates on a check that reaches a pair
+        // after its own check of it succeeded. When ours came first, as with
+        // candidates the peer sent before checking, the next one would only
+        // come with the keepalives.
+        let triggered = !self.ice_lite
+            && (pair.state() == CheckState::Waiting
+                || (!self.controlling
+                    && pair.state() == CheckState::Succeeded
+                    && !pair.is_nominated()));
+
         if self.controlling && pair.state() == CheckState::Succeeded {
             // See if we can nominate something now.
             self.evaluate_nomination();
@@ -1663,6 +1679,16 @@ impl IceAgent {
         };
 
         self.transmit.push_back(trans);
+
+        if triggered
+            && let Some(idx) = self
+                .candidate_pairs
+                .iter()
+                .position(|p| p.local_idx() == local_idx && p.remote_idx() == remote_idx)
+        {
+            trace!("Triggered check on {:?}", self.candidate_pairs[idx]);
+            self.stun_client_binding_request(req.now, idx);
+        }
     }
 
     fn send_role_conflict_reply(&mut self, req: &StunRequest) {
@@ -1816,6 +1842,10 @@ impl IceAgent {
     fn stun_client_handle_response(&mut self, now: Instant, message: StunMessage<'_>) {
         // Find the candidate pair that this trans_id was sent for.
         let trans_id = message.trans_id();
+        let pair_idx = self
+            .candidate_pairs
+            .iter()
+            .position(|p| p.binding_attempt(trans_id).is_some());
         let maybe_pair = self
             .candidate_pairs
             .iter_mut()
@@ -1910,10 +1940,27 @@ impl IceAgent {
             (pair, idx)
         };
 
+        let was_succeeded = pair.state() == CheckState::Succeeded;
         pair.record_binding_response(now, trans_id, valid_idx);
+
+        // A controlled agent whose first check of a pair succeeds after the
+        // peer checked that pair too, still without nominating it, checks it
+        // once more: the peer got our earlier check before its own succeeded,
+        // and pion nominates on a check that reaches a pair after that.
+        let recheck = !self.controlling
+            && !self.ice_lite
+            && !was_succeeded
+            && pair.state() == CheckState::Succeeded
+            && !pair.is_nominated()
+            && pair.remote_binding_request_time().is_some();
 
         if self.controlling {
             self.evaluate_nomination();
+        }
+
+        if recheck && let Some(idx) = pair_idx {
+            trace!("Check again a pair the peer checked meanwhile");
+            self.stun_client_binding_request(now, idx);
         }
 
         // State might change when we get a response.
@@ -2648,6 +2695,179 @@ mod test {
 
         let agent = new_test_agent();
         assert!(!agent.accepts_message(&stun_msg));
+    }
+
+    /// RFC 8445 §7.3.1.4: a check from the peer on a pair this agent has not
+    /// checked yet is answered, and that pair is checked at once rather than
+    /// in turn at Ta.
+    #[test]
+    fn a_check_on_an_unchecked_pair_triggers_ours_on_it() {
+        let mut agent = new_test_agent();
+        agent.set_controlling(false);
+        agent
+            .add_local_candidate(Candidate::host(ipv4_1(), "udp").unwrap())
+            .unwrap();
+        let remote_creds = IceCreds::new();
+        agent.set_remote_credentials(remote_creds.clone());
+        let mut prio = 0;
+        for addr in [ipv4_2(), ipv4_3(), ipv4_4()] {
+            let mut c = Candidate::host(addr, "udp").unwrap();
+            c.set_ufrag(&remote_creds.ufrag);
+            prio = c.prio();
+            agent.add_remote_candidate(c);
+        }
+
+        // One pair checked in turn; the peer then checks one of the others.
+        let now = Instant::now();
+        agent.handle_timeout(now);
+        let mut checked = Vec::new();
+        while let Some(t) = agent.poll_transmit() {
+            checked.push(t.destination);
+        }
+        assert_eq!(checked.len(), 1, "paced: one pair per Ta");
+        let peer = [ipv4_2(), ipv4_3(), ipv4_4()]
+            .into_iter()
+            .find(|addr| !checked.contains(addr))
+            .unwrap();
+        let request =
+            make_serialized_binding_request(&agent.local_credentials, &remote_creds, true, prio);
+        agent.handle_packet(
+            now + Duration::from_millis(1),
+            StunPacket {
+                message: StunMessage::parse(&request).unwrap(),
+                source: peer,
+                destination: ipv4_1(),
+                proto: Protocol::Udp,
+            },
+        );
+
+        let mut sent = Vec::new();
+        while let Some(t) = agent.poll_transmit() {
+            let message = Vec::from(t.contents);
+            let message = StunMessage::parse(&message).unwrap();
+            sent.push((t.destination, message.is_binding_request()));
+        }
+        assert_eq!(
+            sent,
+            vec![(peer, false), (peer, true)],
+            "the reply, then our check on the same pair"
+        );
+    }
+
+    /// A controlled agent checks again a pair it checked successfully when the
+    /// peer checks it without nominating it: pion nominates on a check that
+    /// reaches a pair after its own check of it succeeded.
+    #[test]
+    fn a_check_on_a_pair_already_checked_and_not_nominated_triggers_ours_again() {
+        let mut agent = new_test_agent();
+        agent.set_controlling(false);
+        agent
+            .add_local_candidate(Candidate::host(ipv4_1(), "udp").unwrap())
+            .unwrap();
+        let remote_creds = IceCreds::new();
+        agent.set_remote_credentials(remote_creds.clone());
+        let mut remote = Candidate::host(ipv4_2(), "udp").unwrap();
+        remote.set_ufrag(&remote_creds.ufrag);
+        let prio = remote.prio();
+        agent.add_remote_candidate(remote);
+
+        // Our check of the pair succeeds before the peer checks it.
+        let now = Instant::now();
+        agent.handle_timeout(now);
+        let ours = Vec::from(agent.poll_transmit().unwrap().contents);
+        let ours = StunMessage::parse(&ours).unwrap();
+        let reply = make_authenticated_stun_reply(ours.trans_id(), ipv4_1(), &remote_creds.pass);
+        agent.handle_packet(
+            now + Duration::from_millis(1),
+            StunPacket {
+                message: StunMessage::parse(&reply).unwrap(),
+                source: ipv4_2(),
+                destination: ipv4_1(),
+                proto: Protocol::Udp,
+            },
+        );
+        while agent.poll_transmit().is_some() {}
+
+        // The peer checks it, without nominating it.
+        let request =
+            make_serialized_binding_request(&agent.local_credentials, &remote_creds, true, prio);
+        agent.handle_packet(
+            now + Duration::from_millis(2),
+            StunPacket {
+                message: StunMessage::parse(&request).unwrap(),
+                source: ipv4_2(),
+                destination: ipv4_1(),
+                proto: Protocol::Udp,
+            },
+        );
+
+        let mut sent = Vec::new();
+        while let Some(t) = agent.poll_transmit() {
+            let message = Vec::from(t.contents);
+            let message = StunMessage::parse(&message).unwrap();
+            sent.push((t.destination, message.is_binding_request()));
+        }
+        assert_eq!(
+            sent,
+            vec![(ipv4_2(), false), (ipv4_2(), true)],
+            "the reply, then our check again on the same pair"
+        );
+    }
+
+    /// A controlled agent whose check of a pair succeeds after the peer checked
+    /// that pair too checks it once more: the peer got our check before its
+    /// own succeeded, and pion nominates on a check that reaches a pair after.
+    #[test]
+    fn a_pair_the_peer_checked_while_ours_was_in_flight_is_checked_again() {
+        let mut agent = new_test_agent();
+        agent.set_controlling(false);
+        agent
+            .add_local_candidate(Candidate::host(ipv4_1(), "udp").unwrap())
+            .unwrap();
+        let remote_creds = IceCreds::new();
+        agent.set_remote_credentials(remote_creds.clone());
+        let mut remote = Candidate::host(ipv4_2(), "udp").unwrap();
+        remote.set_ufrag(&remote_creds.ufrag);
+        let prio = remote.prio();
+        agent.add_remote_candidate(remote);
+
+        // Our check is in flight when the peer checks the same pair.
+        let now = Instant::now();
+        agent.handle_timeout(now);
+        let ours = Vec::from(agent.poll_transmit().unwrap().contents);
+        let ours = StunMessage::parse(&ours).unwrap();
+        let request =
+            make_serialized_binding_request(&agent.local_credentials, &remote_creds, true, prio);
+        agent.handle_packet(
+            now + Duration::from_millis(1),
+            StunPacket {
+                message: StunMessage::parse(&request).unwrap(),
+                source: ipv4_2(),
+                destination: ipv4_1(),
+                proto: Protocol::Udp,
+            },
+        );
+        while agent.poll_transmit().is_some() {}
+
+        // Ours then succeeds.
+        let reply = make_authenticated_stun_reply(ours.trans_id(), ipv4_1(), &remote_creds.pass);
+        agent.handle_packet(
+            now + Duration::from_millis(2),
+            StunPacket {
+                message: StunMessage::parse(&reply).unwrap(),
+                source: ipv4_2(),
+                destination: ipv4_1(),
+                proto: Protocol::Udp,
+            },
+        );
+
+        let mut sent = Vec::new();
+        while let Some(t) = agent.poll_transmit() {
+            let message = Vec::from(t.contents);
+            let message = StunMessage::parse(&message).unwrap();
+            sent.push((t.destination, message.is_binding_request()));
+        }
+        assert_eq!(sent, vec![(ipv4_2(), true)], "our check again on the pair");
     }
 
     #[test]
