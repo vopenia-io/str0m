@@ -40,6 +40,7 @@ pub struct RtcConfig {
     pub(crate) initial_stun_rto: Option<Duration>,
     pub(crate) max_stun_rto: Option<Duration>,
     pub(crate) max_stun_retransmits: Option<usize>,
+    pub(crate) ice_timing_advance: Option<Duration>,
     pub(crate) codec_config: CodecConfig,
     pub(crate) exts: ExtensionMap,
     pub(crate) stats_interval: Option<Duration>,
@@ -178,6 +179,14 @@ impl RtcConfig {
     /// Defaults to 9.
     pub fn set_max_stun_retransmits(&mut self, num: usize) {
         self.max_stun_retransmits = Some(num);
+    }
+
+    /// Sets the ICE timing advance (Ta): the minimum time between two
+    /// connectivity checks the agent sends.
+    ///
+    /// Defaults to 50ms (RFC 8445 §14.2).
+    pub fn set_ice_timing_advance(&mut self, ta: Duration) {
+        self.ice_timing_advance = Some(ta);
     }
 
     /// Get fingerprint verification mode.
@@ -894,6 +903,7 @@ impl Default for RtcConfig {
             initial_stun_rto: None,
             max_stun_rto: None,
             max_stun_retransmits: None,
+            ice_timing_advance: None,
             codec_config: CodecConfig::new_with_defaults(),
             exts: ExtensionMap::standard(),
             stats_interval: None,

@@ -1246,6 +1246,10 @@ impl Rtc {
             ice.set_max_stun_retransmits(max_stun_retransmits);
         }
 
+        if let Some(ta) = config.ice_timing_advance {
+            ice.set_timing_advance(ta);
+        }
+
         ice.set_mtu(mtu.clone());
 
         let dtls_cert = config
